@@ -5,6 +5,7 @@ MVP per demo: React + Python/FastAPI + ElevenLabs Conversational AI.
 ## Cosa fa
 
 - Carichi knowledge testuale, senza PDF e senza vector store.
+- La knowledge e divisa in comportamento del bot e documentazione prodotto.
 - Avvii una conversazione vocale realtime con un agente ElevenLabs.
 - L'agente risponde usando la knowledge inserita nel prompt di sessione.
 - Quando l'utente chiede un appuntamento, l'agente chiama il client tool `scheduleAppointment`.
@@ -64,4 +65,4 @@ Nel prompt base dell'agente puoi mettere una frase minima, ad esempio:
 You are an Italian receptionist. Follow the session prompt and use the available tools when needed.
 ```
 
-Per questa demo la knowledge viene passata come prompt override da React. Se il tuo workspace ElevenLabs richiede l'abilitazione esplicita degli override, abilita gli override del prompt sull'agente.
+Per questa demo il frontend passa comportamento e documentazione come contextual update all'inizio della sessione, evitando vector store e ricerche esterne.

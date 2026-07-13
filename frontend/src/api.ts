@@ -19,6 +19,43 @@ export type AppointmentInput = {
   notes?: string | null;
 };
 
+export type Knowledge = {
+  behavior: string;
+  documentation: string;
+};
+
+export type PdfKnowledgeResult = Knowledge & {
+  extracted_text: string;
+  extracted_chars: number;
+  pages: number;
+};
+
+export type VectorStoreStats = {
+  chunks: number;
+  sources: number;
+};
+
+export type VectorStorePdfResult = VectorStoreStats & {
+  source: string;
+  pages: number;
+  extracted_chars: number;
+};
+
+export type VectorStoreSource = {
+  source: string;
+  chunks: number;
+  chars: number;
+  preview: string;
+};
+
+export type VectorSearchResult = {
+  id: number;
+  source: string;
+  chunk_index: number;
+  score: number;
+  text: string;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
@@ -37,14 +74,69 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export function getKnowledge() {
-  return request<{ text: string }>("/api/knowledge");
+  return request<Knowledge>("/api/knowledge");
 }
 
-export function saveKnowledge(text: string) {
-  return request<{ text: string }>("/api/knowledge", {
+export function saveKnowledge(knowledge: Knowledge) {
+  return request<Knowledge>("/api/knowledge", {
     method: "PUT",
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(knowledge),
   });
+}
+
+export async function uploadKnowledgePdf(file: File, mode: "append" | "replace") {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(
+    `${API_BASE_URL}/api/knowledge/pdf?mode=${encodeURIComponent(mode)}`,
+    {
+      method: "POST",
+      body: formData,
+    },
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `HTTP ${response.status}`);
+  }
+
+  return response.json() as Promise<PdfKnowledgeResult>;
+}
+
+export async function uploadVectorStorePdf(file: File, mode: "append" | "replace") {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(
+    `${API_BASE_URL}/api/vector-store/pdf?mode=${encodeURIComponent(mode)}`,
+    {
+      method: "POST",
+      body: formData,
+    },
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `HTTP ${response.status}`);
+  }
+
+  return response.json() as Promise<VectorStorePdfResult>;
+}
+
+export function getVectorStoreStats() {
+  return request<VectorStoreStats>("/api/vector-store/stats");
+}
+
+export function getVectorStoreSources() {
+  return request<VectorStoreSource[]>("/api/vector-store/sources");
+}
+
+export function searchVectorStore(query: string, limit = 4) {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return request<{ results: VectorSearchResult[] }>(
+    `/api/vector-store/search?${params.toString()}`,
+  );
 }
 
 export function getSignedUrl() {

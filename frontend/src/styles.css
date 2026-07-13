@@ -107,11 +107,30 @@ textarea {
   border-radius: 8px;
   color: #17211b;
   line-height: 1.5;
-  min-height: 565px;
   outline: none;
   padding: 16px;
   resize: vertical;
   width: 100%;
+}
+
+.behavior-editor {
+  min-height: 150px;
+}
+
+.documentation-editor {
+  min-height: 380px;
+}
+
+.field-label {
+  color: #314038;
+  display: block;
+  font-size: 0.86rem;
+  font-weight: 800;
+  margin: 14px 0 8px;
+}
+
+.field-label:first-of-type {
+  margin-top: 0;
 }
 
 textarea:focus {
@@ -174,6 +193,100 @@ textarea:focus {
   background: #ffffff;
   color: #17211b;
   box-shadow: 0 1px 4px rgba(33, 45, 37, 0.12);
+}
+
+.pdf-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin: 0 0 10px;
+}
+
+.pdf-mode-toggle {
+  margin: 0;
+  max-width: 220px;
+  width: 100%;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.pdf-upload-button {
+  align-items: center;
+  background: #1f6f5b;
+  border: 0;
+  border-radius: 8px;
+  color: #ffffff;
+  display: inline-flex;
+  font-weight: 800;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 14px;
+}
+
+.pdf-upload-button.secondary {
+  background: #314038;
+}
+
+.pdf-status {
+  align-items: center;
+  background: #eef6f0;
+  border: 1px solid #cfe1d2;
+  border-radius: 8px;
+  color: #314038;
+  display: flex;
+  font-size: 0.84rem;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 9px 10px;
+}
+
+.pdf-status.vector-status {
+  background: #f4f6f1;
+  border-color: #dfe5dc;
+}
+
+.vector-sources {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.vector-source-card {
+  background: #fbfcfa;
+  border: 1px solid #dfe5dc;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.vector-source-card div {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.vector-source-card strong {
+  color: #17211b;
+}
+
+.vector-source-card span,
+.vector-source-card p {
+  color: #667064;
+}
+
+.vector-source-card p {
+  display: -webkit-box;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
 }
 
 .status-pill {
@@ -394,7 +507,11 @@ textarea:focus {
   }
 
   textarea {
-    min-height: 360px;
+    min-height: 260px;
+  }
+
+  .behavior-editor {
+    min-height: 140px;
   }
 }
 
