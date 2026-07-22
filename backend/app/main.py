@@ -59,10 +59,26 @@ class KnowledgePayload(BaseModel):
     documentation: str = Field(default="", max_length=80_000)
 
 
+class DocumentationPayload(BaseModel):
+    documentation: str = Field(default="", max_length=80_000)
+
+
 class PdfKnowledgeResult(KnowledgePayload):
     extracted_text: str
     extracted_chars: int
     pages: int
+
+
+class BotBehaviorIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    content: str = Field(default="", max_length=20_000)
+
+
+class BotBehavior(BotBehaviorIn):
+    id: int
+    is_active: bool
+    created_at: str
+    updated_at: str
 
 
 class VectorStoreStats(BaseModel):
@@ -211,6 +227,80 @@ def ensure_storage() -> None:
             ON vector_chunks (source)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_behaviors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                content TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        behaviors_count = conn.execute("SELECT COUNT(*) FROM bot_behaviors").fetchone()[0]
+        if behaviors_count == 0:
+            now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            content = BEHAVIOR_PATH.read_text(encoding="utf-8").strip()
+            conn.execute(
+                """
+                INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at)
+                VALUES (?, ?, 1, ?, ?)
+                """,
+                ("Predefinito", content, now, now),
+            )
+        conn.commit()
+
+
+def row_to_bot_behavior(row: sqlite3.Row) -> BotBehavior:
+    return BotBehavior(
+        id=row["id"],
+        name=row["name"],
+        content=row["content"],
+        is_active=bool(row["is_active"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def list_bot_behaviors() -> list[BotBehavior]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT * FROM bot_behaviors
+            ORDER BY is_active DESC, updated_at DESC, id DESC
+            """
+        ).fetchall()
+
+    return [row_to_bot_behavior(row) for row in rows]
+
+
+def update_active_bot_behavior(content: str) -> None:
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        active_id = conn.execute(
+            "SELECT id FROM bot_behaviors WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if active_id:
+            conn.execute(
+                """
+                UPDATE bot_behaviors
+                SET content = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (content, now, active_id[0]),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at)
+                VALUES (?, ?, 1, ?, ?)
+                """,
+                ("Predefinito", content, now, now),
+            )
         conn.commit()
 
 
@@ -346,16 +436,30 @@ def index_vector_chunks(source: str, text: str, replace_source: bool = True) -> 
     return inserted
 
 
-def search_vector_chunks(query: str, limit: int = 5) -> list[VectorSearchResult]:
+def search_vector_chunks(
+    query: str,
+    limit: int = 5,
+    source: str | None = None,
+) -> list[VectorSearchResult]:
     query_vector = embed_text(query)
     if not query_vector:
         return []
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, source, chunk_index, text, vector_json FROM vector_chunks"
-        ).fetchall()
+        if source:
+            rows = conn.execute(
+                """
+                SELECT id, source, chunk_index, text, vector_json
+                FROM vector_chunks
+                WHERE source = ?
+                """,
+                (source,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, source, chunk_index, text, vector_json FROM vector_chunks"
+            ).fetchall()
 
     scored: list[VectorSearchResult] = []
     query_terms = set(query_vector)
@@ -459,8 +563,117 @@ def save_knowledge(payload: KnowledgePayload) -> KnowledgePayload:
     behavior = payload.behavior.strip()
     documentation = payload.documentation.strip()
     BEHAVIOR_PATH.write_text(behavior, encoding="utf-8")
+    update_active_bot_behavior(behavior)
     DOCUMENTATION_PATH.write_text(documentation, encoding="utf-8")
     return KnowledgePayload(behavior=behavior, documentation=documentation)
+
+
+@app.put("/api/knowledge/documentation", response_model=KnowledgePayload)
+def save_documentation(payload: DocumentationPayload) -> KnowledgePayload:
+    ensure_storage()
+    documentation = payload.documentation.strip()
+    DOCUMENTATION_PATH.write_text(documentation, encoding="utf-8")
+    return KnowledgePayload(
+        behavior=BEHAVIOR_PATH.read_text(encoding="utf-8"),
+        documentation=documentation,
+    )
+
+
+@app.get("/api/behaviors", response_model=list[BotBehavior])
+def get_bot_behaviors() -> list[BotBehavior]:
+    return list_bot_behaviors()
+
+
+@app.post("/api/behaviors", response_model=BotBehavior)
+def create_bot_behavior(payload: BotBehaviorIn) -> BotBehavior:
+    ensure_storage()
+    name = payload.name.strip()
+    content = payload.content.strip()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("UPDATE bot_behaviors SET is_active = 0")
+        cursor = conn.execute(
+            """
+            INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            """,
+            (name, content, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM bot_behaviors WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    BEHAVIOR_PATH.write_text(content, encoding="utf-8")
+    return row_to_bot_behavior(row)
+
+
+@app.put("/api/behaviors/{behavior_id}", response_model=BotBehavior)
+def update_bot_behavior(behavior_id: int, payload: BotBehaviorIn) -> BotBehavior:
+    ensure_storage()
+    name = payload.name.strip()
+    content = payload.content.strip()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM bot_behaviors WHERE id = ?",
+            (behavior_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Behavior not found")
+
+        conn.execute(
+            """
+            UPDATE bot_behaviors
+            SET name = ?, content = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (name, content, now, behavior_id),
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM bot_behaviors WHERE id = ?",
+            (behavior_id,),
+        ).fetchone()
+
+    if updated["is_active"]:
+        BEHAVIOR_PATH.write_text(content, encoding="utf-8")
+    return row_to_bot_behavior(updated)
+
+
+@app.post("/api/behaviors/{behavior_id}/activate", response_model=BotBehavior)
+def activate_bot_behavior(behavior_id: int) -> BotBehavior:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM bot_behaviors WHERE id = ?",
+            (behavior_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Behavior not found")
+
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        conn.execute("UPDATE bot_behaviors SET is_active = 0")
+        conn.execute(
+            """
+            UPDATE bot_behaviors
+            SET is_active = 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, behavior_id),
+        )
+        conn.commit()
+        active = conn.execute(
+            "SELECT * FROM bot_behaviors WHERE id = ?",
+            (behavior_id,),
+        ).fetchone()
+
+    BEHAVIOR_PATH.write_text(active["content"], encoding="utf-8")
+    return row_to_bot_behavior(active)
 
 
 @app.post("/api/knowledge/pdf", response_model=PdfKnowledgeResult)
@@ -545,9 +758,10 @@ async def upload_pdf_vector_store(
 def search_vector_store(
     q: str = Query(min_length=2, max_length=1000),
     limit: int = Query(default=4, ge=1, le=8),
+    source: str | None = Query(default=None, min_length=1, max_length=260),
 ) -> VectorSearchResponse:
     ensure_storage()
-    return VectorSearchResponse(results=search_vector_chunks(q, limit))
+    return VectorSearchResponse(results=search_vector_chunks(q, limit, source))
 
 
 @app.get("/api/elevenlabs/signed-url")

@@ -9,15 +9,12 @@ import {
 import {
   CalendarClock,
   Database,
-  FileText,
   Loader2,
   Mic,
   MicOff,
   PhoneCall,
   Send,
-  Save,
   Square,
-  Upload,
 } from "lucide-react";
 import {
   Appointment,
@@ -33,20 +30,24 @@ import {
   getVectorStoreSources,
   getVectorStoreStats,
   listAppointments,
-  saveKnowledge,
   searchVectorStore,
-  uploadKnowledgePdf,
   uploadVectorStorePdf,
 } from "./api";
 import "./styles.css";
 
 const BEHAVIOR_LIMIT = 8_000;
-const DOCUMENTATION_LIMIT = 24_000;
+const LOCAL_BEHAVIOR_KEY = "centralino.localBehavior";
 
 type RetrievalQuery = {
   id: number;
   text: string;
 };
+
+type CallScenario = "inbound" | "outbound";
+
+function callScenarioLabel(callScenario: CallScenario) {
+  return callScenario === "inbound" ? "chiamata in entrata" : "chiamata in uscita";
+}
 
 function readableEvent(value: unknown) {
   if (value instanceof Error) {
@@ -84,22 +85,35 @@ function getUserMessage(value: unknown) {
   return null;
 }
 
-function buildContextUpdate(knowledge: Knowledge) {
-  const behavior = knowledge.behavior.slice(0, BEHAVIOR_LIMIT);
-  const documentation = knowledge.documentation.slice(0, DOCUMENTATION_LIMIT);
+function buildContextUpdate(
+  selectedVectorSource: string | null,
+  callScenario: CallScenario,
+) {
+  const sourceInstruction = selectedVectorSource
+    ? `Fonte PDF attiva per il vector store: ${selectedVectorSource}. Quando cerchi nella documentazione PDF usa solo questa fonte.`
+    : "Fonte PDF attiva per il vector store: tutte le fonti caricate.";
+  const scenarioInstruction = `Scenario corrente: ${callScenarioLabel(callScenario)}.`;
+
   return `
 Contesto operativo per questa conversazione.
 Rispondi in italiano, in modo naturale, breve e professionale.
+${scenarioInstruction}
 Segui prima le istruzioni di comportamento, poi usa la documentazione per rispondere a domande su servizi, orari, regole, prezzi o procedure.
 Se la documentazione non contiene la risposta, dillo con chiarezza e proponi di lasciare un appuntamento o un recapito.
 Per domande sulla documentazione, sui PDF caricati o su argomenti specifici come detassazione, reddito presunto, rinnovi contrattuali, maggiorazioni o mensilita, chiama prima il tool searchKnowledge con una query breve e specifica.
 Non dire che non hai informazioni prima di aver cercato con searchKnowledge.
+${sourceInstruction}
+`.trim();
+}
 
-COMPORTAMENTO DEL BOT:
-${behavior || "Nessuna istruzione di comportamento caricata."}
-
-DOCUMENTAZIONE:
-${documentation || "Nessuna documentazione caricata."}
+function buildRealtimeContextUpdate(
+  callScenario: CallScenario,
+  selectedVectorSource: string | null,
+) {
+  return `
+Scenario corrente: ${callScenarioLabel(callScenario)}.
+Fonte PDF attiva: ${selectedVectorSource || "tutte le fonti"}.
+Per domande su documenti o PDF usa il tool searchKnowledge prima di rispondere.
 `.trim();
 }
 
@@ -125,21 +139,21 @@ ${passages}
 
 function App() {
   const [knowledge, setKnowledge] = useState<Knowledge>({
-    behavior: "",
+    behavior:
+      typeof window === "undefined" ? "" : window.localStorage.getItem(LOCAL_BEHAVIOR_KEY) ?? "",
     documentation: "",
   });
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [messages, setMessages] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const [isUploadingPdf, setIsUploadingPdf] = useState(false);
   const [pdfMode, setPdfMode] = useState<"append" | "replace">("append");
-  const [pdfStatus, setPdfStatus] = useState<string | null>(null);
+  const [callScenario, setCallScenario] = useState<CallScenario>("inbound");
   const [vectorStats, setVectorStats] = useState<VectorStoreStats>({
     chunks: 0,
     sources: 0,
   });
   const [vectorSources, setVectorSources] = useState<VectorStoreSource[]>([]);
+  const [selectedVectorSource, setSelectedVectorSource] = useState<string | null>(null);
   const [retrievalQuery, setRetrievalQuery] = useState<RetrievalQuery | null>(null);
   const [isIndexingPdf, setIsIndexingPdf] = useState(false);
   const [vectorStatus, setVectorStatus] = useState<string | null>(null);
@@ -158,7 +172,10 @@ function App() {
       getVectorStoreSources(),
     ])
       .then(([knowledgeResponse, appointmentRows, stats, sources]) => {
-        setKnowledge(knowledgeResponse);
+        setKnowledge((current) => ({
+          behavior: current.behavior || knowledgeResponse.behavior,
+          documentation: knowledgeResponse.documentation,
+        }));
         setAppointments(appointmentRows);
         setVectorStats(stats);
         setVectorSources(sources);
@@ -169,57 +186,41 @@ function App() {
       .finally(() => setIsLoading(false));
   }, []);
 
-  const handleSaveKnowledge = useCallback(async () => {
-    setIsSaving(true);
-    setError(null);
-    try {
-      const response = await saveKnowledge(knowledge);
-      setKnowledge(response);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Salvataggio fallito");
-    } finally {
-      setIsSaving(false);
+  useEffect(() => {
+    if (
+      selectedVectorSource &&
+      !vectorSources.some((source) => source.source === selectedVectorSource)
+    ) {
+      setSelectedVectorSource(null);
     }
-  }, [knowledge]);
-
-  const handlePdfUpload = useCallback(
-    async (file: File) => {
-      setIsUploadingPdf(true);
-      setPdfStatus(null);
-      setError(null);
-      try {
-        const response = await uploadKnowledgePdf(file, pdfMode);
-        setKnowledge({
-          behavior: response.behavior,
-          documentation: response.documentation,
-        });
-        setPdfStatus(
-          `${file.name}: ${response.pages} pagine, ${response.extracted_chars.toLocaleString(
-            "it-IT",
-          )} caratteri estratti`,
-        );
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Upload PDF fallito");
-      } finally {
-        setIsUploadingPdf(false);
-      }
-    },
-    [pdfMode],
-  );
+  }, [selectedVectorSource, vectorSources]);
 
   const handleVectorPdfUpload = useCallback(
-    async (file: File) => {
+    async (files: File[]) => {
+      if (files.length === 0) {
+        return;
+      }
+
       setIsIndexingPdf(true);
       setVectorStatus(null);
       setError(null);
       try {
-        const response = await uploadVectorStorePdf(file, pdfMode);
-        setVectorStats({ chunks: response.chunks, sources: response.sources });
-        setVectorSources(await getVectorStoreSources());
+        const responses = [];
+        for (const file of files) {
+          responses.push(await uploadVectorStorePdf(file, pdfMode));
+        }
+
+        const lastResponse = responses[responses.length - 1];
+        const sources = await getVectorStoreSources();
+        setVectorStats({ chunks: lastResponse.chunks, sources: lastResponse.sources });
+        setVectorSources(sources);
+        setSelectedVectorSource(lastResponse.source);
         setVectorStatus(
-          `${response.source}: ${response.pages} pagine, ${response.extracted_chars.toLocaleString(
-            "it-IT",
-          )} caratteri indicizzati`,
+          files.length === 1
+            ? `${lastResponse.source}: ${lastResponse.pages} pagine, ${lastResponse.extracted_chars.toLocaleString(
+                "it-IT",
+              )} caratteri indicizzati`
+            : `${files.length} PDF indicizzati, fonte attiva: ${lastResponse.source}`,
         );
       } catch (err) {
         setError(err instanceof Error ? err.message : "Indicizzazione PDF fallita");
@@ -247,12 +248,14 @@ function App() {
       }
 
       const limit = Math.min(Math.max(input.limit ?? 4, 1), 6);
-      const response = await searchVectorStore(query, limit);
+      const response = await searchVectorStore(query, limit, selectedVectorSource);
       setMessages((current) =>
-        [`tool searchKnowledge: "${query}" -> ${response.results.length} risultati`, ...current].slice(
-          0,
-          12,
-        ),
+        [
+          `tool searchKnowledge: "${query}"${
+            selectedVectorSource ? ` [${selectedVectorSource}]` : ""
+          } -> ${response.results.length} risultati`,
+          ...current,
+        ].slice(0, 12),
       );
 
       if (response.results.length === 0) {
@@ -268,7 +271,7 @@ function App() {
         )
         .join("\n\n---\n\n");
     },
-    [],
+    [selectedVectorSource],
   );
 
   const providerConfig = useMemo(
@@ -300,8 +303,8 @@ function App() {
       onDebug: (message: unknown) => {
         setMessages((current) => [`debug: ${readableEvent(message)}`, ...current].slice(0, 12));
       },
-      onVadScore: (message: unknown) => {
-        setMessages((current) => [`vad: ${readableEvent(message)}`, ...current].slice(0, 12));
+      onVadScore: () => {
+        // VAD fires very frequently while speaking; avoid re-rendering during audio capture.
       },
       onAsrInitiationMetadata: (message: unknown) => {
         setMessages((current) => [`asr: ${readableEvent(message)}`, ...current].slice(0, 12));
@@ -321,23 +324,24 @@ function App() {
         appointments={appointments}
         error={error}
         isLoading={isLoading}
-        isSaving={isSaving}
         knowledge={knowledge}
         messages={messages}
-        onKnowledgeChange={setKnowledge}
+        callScenario={callScenario}
+        onKnowledgeChange={(value) => {
+          window.localStorage.setItem(LOCAL_BEHAVIOR_KEY, value.behavior);
+          setKnowledge(value);
+        }}
+        onCallScenarioChange={setCallScenario}
         onPdfModeChange={setPdfMode}
-        onPdfUpload={handlePdfUpload}
         onVectorPdfUpload={handleVectorPdfUpload}
-        onRefreshAppointments={refreshAppointments}
-        onSaveKnowledge={handleSaveKnowledge}
+        onVectorSourceChange={setSelectedVectorSource}
         onSetError={setError}
         pdfMode={pdfMode}
-        pdfStatus={pdfStatus}
-        isUploadingPdf={isUploadingPdf}
         isIndexingPdf={isIndexingPdf}
         vectorStats={vectorStats}
         vectorStatus={vectorStatus}
         vectorSources={vectorSources}
+        selectedVectorSource={selectedVectorSource}
         retrievalQuery={retrievalQuery}
       />
     </ConversationProvider>
@@ -348,23 +352,21 @@ type ShellProps = {
   appointments: Appointment[];
   error: string | null;
   isLoading: boolean;
-  isSaving: boolean;
   isIndexingPdf: boolean;
-  isUploadingPdf: boolean;
   knowledge: Knowledge;
   messages: string[];
+  callScenario: CallScenario;
   pdfMode: "append" | "replace";
-  pdfStatus: string | null;
   vectorStats: VectorStoreStats;
   vectorStatus: string | null;
   vectorSources: VectorStoreSource[];
+  selectedVectorSource: string | null;
   retrievalQuery: RetrievalQuery | null;
+  onCallScenarioChange: (value: CallScenario) => void;
   onKnowledgeChange: (value: Knowledge) => void;
   onPdfModeChange: (value: "append" | "replace") => void;
-  onPdfUpload: (file: File) => Promise<void>;
-  onVectorPdfUpload: (file: File) => Promise<void>;
-  onRefreshAppointments: () => Promise<void>;
-  onSaveKnowledge: () => Promise<void>;
+  onVectorPdfUpload: (files: File[]) => Promise<void>;
+  onVectorSourceChange: (source: string | null) => void;
   onSetError: (value: string | null) => void;
 };
 
@@ -373,24 +375,22 @@ function Shell({
   error,
   isLoading,
   isIndexingPdf,
-  isSaving,
-  isUploadingPdf,
   knowledge,
   messages,
+  callScenario,
   pdfMode,
-  pdfStatus,
   vectorStats,
   vectorStatus,
   vectorSources,
+  selectedVectorSource,
   retrievalQuery,
+  onCallScenarioChange,
   onKnowledgeChange,
   onPdfModeChange,
-  onPdfUpload,
   onVectorPdfUpload,
-  onSaveKnowledge,
+  onVectorSourceChange,
   onSetError,
 }: ShellProps) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const vectorFileInputRef = useRef<HTMLInputElement | null>(null);
 
   return (
@@ -416,18 +416,9 @@ function Shell({
         <div className="workspace-panel knowledge-panel">
           <div className="panel-heading">
             <div>
-              <p className="eyebrow">Knowledge testuale</p>
-              <h2>Contesto dell'agente</h2>
+              <p className="eyebrow">Knowledge PDF</p>
+              <h2>Fonti dell'agente</h2>
             </div>
-            <button
-              className="icon-button primary"
-              disabled={isLoading || isSaving}
-              title="Salva knowledge"
-              type="button"
-              onClick={onSaveKnowledge}
-            >
-              {isSaving ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
-            </button>
           </div>
           <label className="field-label" htmlFor="behavior">
             Comportamento del bot
@@ -441,14 +432,14 @@ function Shell({
               onKnowledgeChange({ ...knowledge, behavior: event.target.value })
             }
           />
-          <label className="field-label" htmlFor="documentation">
-            Documentazione
+          <label className="field-label">
+            Vector PDF
           </label>
           <div className="pdf-toolbar">
             <div className="transport-toggle pdf-mode-toggle">
               <button
                 className={pdfMode === "append" ? "active" : ""}
-                disabled={isUploadingPdf}
+                disabled={isIndexingPdf}
                 type="button"
                 onClick={() => onPdfModeChange("append")}
               >
@@ -456,7 +447,7 @@ function Shell({
               </button>
               <button
                 className={pdfMode === "replace" ? "active" : ""}
-                disabled={isUploadingPdf}
+                disabled={isIndexingPdf}
                 type="button"
                 onClick={() => onPdfModeChange("replace")}
               >
@@ -466,41 +457,15 @@ function Shell({
             <input
               accept="application/pdf"
               className="hidden-file-input"
-              disabled={isUploadingPdf}
-              ref={fileInputRef}
-              type="file"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.target.value = "";
-                if (file) {
-                  void onPdfUpload(file);
-                }
-              }}
-            />
-            <button
-              className="pdf-upload-button"
-              disabled={isUploadingPdf}
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {isUploadingPdf ? (
-                <Loader2 className="spin" size={16} />
-              ) : (
-                <Upload size={16} />
-              )}
-              PDF
-            </button>
-            <input
-              accept="application/pdf"
-              className="hidden-file-input"
               disabled={isIndexingPdf}
+              multiple
               ref={vectorFileInputRef}
               type="file"
               onChange={(event) => {
-                const file = event.target.files?.[0];
+                const files = Array.from(event.target.files ?? []);
                 event.target.value = "";
-                if (file) {
-                  void onVectorPdfUpload(file);
+                if (files.length > 0) {
+                  void onVectorPdfUpload(files);
                 }
               }}
             />
@@ -518,12 +483,6 @@ function Shell({
               Vector PDF
             </button>
           </div>
-          {pdfStatus && (
-            <div className="pdf-status">
-              <FileText size={15} />
-              <span>{pdfStatus}</span>
-            </div>
-          )}
           <div className="pdf-status vector-status">
             <Database size={15} />
             <span>
@@ -534,8 +493,27 @@ function Shell({
           </div>
           {vectorSources.length > 0 && (
             <div className="vector-sources">
+              <label className="vector-source-option all-sources">
+                <input
+                  checked={selectedVectorSource === null}
+                  name="vector-source"
+                  type="radio"
+                  onChange={() => onVectorSourceChange(null)}
+                />
+                <span>
+                  <strong>Tutte le fonti</strong>
+                  <small>Il tool cerca in tutti i PDF indicizzati.</small>
+                </span>
+              </label>
               {vectorSources.map((source) => (
-                <article className="vector-source-card" key={source.source}>
+                <label className="vector-source-option" key={source.source}>
+                  <input
+                    checked={selectedVectorSource === source.source}
+                    name="vector-source"
+                    type="radio"
+                    onChange={() => onVectorSourceChange(source.source)}
+                  />
+                  <article className="vector-source-card">
                   <div>
                     <strong>{source.source}</strong>
                     <span>
@@ -544,33 +522,26 @@ function Shell({
                     </span>
                   </div>
                   <p>{source.preview}</p>
-                </article>
+                  </article>
+                </label>
               ))}
             </div>
           )}
-          <textarea
-            className="documentation-editor"
-            disabled={isLoading}
-            id="documentation"
-            value={knowledge.documentation}
-            onChange={(event) =>
-              onKnowledgeChange({ ...knowledge, documentation: event.target.value })
-            }
-          />
           <div className="meter-row">
             <span>
               Bot: {knowledge.behavior.length.toLocaleString("it-IT")} /{" "}
               {BEHAVIOR_LIMIT.toLocaleString("it-IT")}
             </span>
-            <span>
-              Docs: {knowledge.documentation.length.toLocaleString("it-IT")} /{" "}
-              {DOCUMENTATION_LIMIT.toLocaleString("it-IT")}
-            </span>
           </div>
         </div>
 
         <div className="right-column">
-          <VoicePanel knowledge={knowledge} retrievalQuery={retrievalQuery} />
+          <VoicePanel
+            callScenario={callScenario}
+            onCallScenarioChange={onCallScenarioChange}
+            retrievalQuery={retrievalQuery}
+            selectedVectorSource={selectedVectorSource}
+          />
           <AppointmentsPanel appointments={appointments} />
           <DebugPanel messages={messages} />
         </div>
@@ -580,11 +551,15 @@ function Shell({
 }
 
 function VoicePanel({
-  knowledge,
+  callScenario,
+  onCallScenarioChange,
   retrievalQuery,
+  selectedVectorSource,
 }: {
-  knowledge: Knowledge;
+  callScenario: CallScenario;
+  onCallScenarioChange: (value: CallScenario) => void;
   retrievalQuery: RetrievalQuery | null;
+  selectedVectorSource: string | null;
 }) {
   const {
     startSession,
@@ -600,20 +575,44 @@ function VoicePanel({
   const [textMessage, setTextMessage] = useState("");
   const [connectionMode, setConnectionMode] = useState<"webrtc" | "websocket">("webrtc");
   const hasSentContextRef = useRef(false);
+  const lastContextUpdateRef = useRef("");
   const lastRetrievalIdRef = useRef<number | null>(null);
   const isConnected = status === "connected";
 
   useEffect(() => {
     if (!isConnected) {
       hasSentContextRef.current = false;
+      lastContextUpdateRef.current = "";
       return;
     }
 
-    if (!hasSentContextRef.current) {
-      sendContextualUpdate(buildContextUpdate(knowledge));
+    const contextUpdate =
+      connectionMode === "webrtc"
+        ? buildRealtimeContextUpdate(callScenario, selectedVectorSource)
+        : buildContextUpdate(selectedVectorSource, callScenario);
+
+    if (!hasSentContextRef.current || lastContextUpdateRef.current !== contextUpdate) {
+      if (connectionMode === "webrtc") {
+        const timeoutId = window.setTimeout(() => {
+          sendContextualUpdate(contextUpdate);
+          hasSentContextRef.current = true;
+          lastContextUpdateRef.current = contextUpdate;
+        }, 800);
+
+        return () => window.clearTimeout(timeoutId);
+      }
+
+      sendContextualUpdate(contextUpdate);
       hasSentContextRef.current = true;
+      lastContextUpdateRef.current = contextUpdate;
     }
-  }, [isConnected, knowledge, sendContextualUpdate]);
+  }, [
+    callScenario,
+    connectionMode,
+    isConnected,
+    selectedVectorSource,
+    sendContextualUpdate,
+  ]);
 
   useEffect(() => {
     if (!isConnected) {
@@ -629,12 +628,17 @@ function VoicePanel({
   }, [getInputVolume, isConnected]);
 
   useEffect(() => {
-    if (!isConnected || !retrievalQuery || lastRetrievalIdRef.current === retrievalQuery.id) {
+    if (
+      !isConnected ||
+      connectionMode === "webrtc" ||
+      !retrievalQuery ||
+      lastRetrievalIdRef.current === retrievalQuery.id
+    ) {
       return;
     }
 
     lastRetrievalIdRef.current = retrievalQuery.id;
-    searchVectorStore(retrievalQuery.text, 4)
+    searchVectorStore(retrievalQuery.text, 4, selectedVectorSource)
       .then((response) => {
         const update = buildRetrievalUpdate(retrievalQuery.text, response.results);
         if (update) {
@@ -644,7 +648,7 @@ function VoicePanel({
       .catch((err: unknown) => {
         console.warn("Vector retrieval failed", err);
       });
-  }, [isConnected, retrievalQuery, sendContextualUpdate]);
+  }, [connectionMode, isConnected, retrievalQuery, selectedVectorSource, sendContextualUpdate]);
 
   const handleStart = async () => {
     setIsStarting(true);
@@ -703,6 +707,26 @@ function VoicePanel({
 
       <div className="input-meter" aria-label="Livello microfono">
         <span style={{ width: `${Math.min(100, Math.round(inputVolume * 100))}%` }} />
+      </div>
+
+      <div className="voice-control-group">
+        <span>Scenario</span>
+        <div className="transport-toggle scenario-toggle">
+          <button
+            className={callScenario === "inbound" ? "active" : ""}
+            type="button"
+            onClick={() => onCallScenarioChange("inbound")}
+          >
+            Entrata
+          </button>
+          <button
+            className={callScenario === "outbound" ? "active" : ""}
+            type="button"
+            onClick={() => onCallScenarioChange("outbound")}
+          >
+            Uscita
+          </button>
+        </div>
       </div>
 
       <div className="transport-toggle">

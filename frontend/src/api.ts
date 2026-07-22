@@ -1,5 +1,5 @@
 export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || "http://localhost:8000";
+  import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || "http://127.0.0.1:8001";
 
 export type Appointment = {
   id: number;
@@ -22,12 +22,6 @@ export type AppointmentInput = {
 export type Knowledge = {
   behavior: string;
   documentation: string;
-};
-
-export type PdfKnowledgeResult = Knowledge & {
-  extracted_text: string;
-  extracted_chars: number;
-  pages: number;
 };
 
 export type VectorStoreStats = {
@@ -77,33 +71,6 @@ export function getKnowledge() {
   return request<Knowledge>("/api/knowledge");
 }
 
-export function saveKnowledge(knowledge: Knowledge) {
-  return request<Knowledge>("/api/knowledge", {
-    method: "PUT",
-    body: JSON.stringify(knowledge),
-  });
-}
-
-export async function uploadKnowledgePdf(file: File, mode: "append" | "replace") {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  const response = await fetch(
-    `${API_BASE_URL}/api/knowledge/pdf?mode=${encodeURIComponent(mode)}`,
-    {
-      method: "POST",
-      body: formData,
-    },
-  );
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(body || `HTTP ${response.status}`);
-  }
-
-  return response.json() as Promise<PdfKnowledgeResult>;
-}
-
 export async function uploadVectorStorePdf(file: File, mode: "append" | "replace") {
   const formData = new FormData();
   formData.append("file", file);
@@ -132,8 +99,12 @@ export function getVectorStoreSources() {
   return request<VectorStoreSource[]>("/api/vector-store/sources");
 }
 
-export function searchVectorStore(query: string, limit = 4) {
+export function searchVectorStore(query: string, limit = 4, source?: string | null) {
   const params = new URLSearchParams({ q: query, limit: String(limit) });
+  if (source) {
+    params.set("source", source);
+  }
+
   return request<{ results: VectorSearchResult[] }>(
     `/api/vector-store/search?${params.toString()}`,
   );
