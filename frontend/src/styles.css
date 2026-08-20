@@ -18,6 +18,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -42,6 +43,40 @@ button:disabled {
   justify-content: space-between;
   margin: 0 auto 22px;
   max-width: 1280px;
+}
+
+.topbar-actions {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.view-tabs {
+  background: #edf2ea;
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+}
+
+.view-tabs button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  color: #526056;
+  display: inline-flex;
+  font-size: 0.84rem;
+  font-weight: 800;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 13px;
+}
+
+.view-tabs button.active {
+  background: #ffffff;
+  color: #17211b;
+  box-shadow: 0 1px 4px rgba(33, 45, 37, 0.12);
 }
 
 .topbar h1,
@@ -77,6 +112,14 @@ button:disabled {
   gap: 18px;
 }
 
+.config-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(360px, 0.75fr) minmax(0, 1.25fr);
+  margin: 0 auto;
+  max-width: 1280px;
+}
+
 .workspace-panel {
   background: #ffffff;
   border: 1px solid #dfe5dc;
@@ -110,6 +153,18 @@ textarea {
   outline: none;
   padding: 16px;
   resize: vertical;
+  width: 100%;
+}
+
+input {
+  background: #fbfcfa;
+  border: 1px solid #ccd6c8;
+  border-radius: 8px;
+  color: #17211b;
+  min-height: 42px;
+  min-width: 0;
+  outline: none;
+  padding: 0 12px;
   width: 100%;
 }
 
@@ -176,9 +231,105 @@ textarea {
   color: #ffffff;
 }
 
+input:focus,
 textarea:focus {
   border-color: #25735b;
   box-shadow: 0 0 0 3px rgba(37, 115, 91, 0.14);
+}
+
+.config-form,
+.agent-create-form,
+.agent-config-list {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-create-form {
+  grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1fr) auto;
+  margin-bottom: 14px;
+}
+
+.compact-action {
+  margin-top: 12px;
+  max-width: 220px;
+}
+
+.config-status {
+  background: #fff7e8;
+  border: 1px solid #f0d9ad;
+  border-radius: 8px;
+  color: #7a5422;
+  font-size: 0.86rem;
+  margin-top: 14px;
+  padding: 10px 12px;
+}
+
+.config-status.ready {
+  background: #eef6f0;
+  border-color: #cfe1d2;
+  color: #314038;
+}
+
+.agent-config-card {
+  background: #fbfcfa;
+  border: 1px solid #dfe5dc;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.agent-config-card.active {
+  border-color: #1f6f5b;
+  box-shadow: 0 0 0 3px rgba(31, 111, 91, 0.12);
+}
+
+.agent-active-choice {
+  align-items: center;
+  color: #314038;
+  cursor: pointer;
+  display: flex;
+  font-size: 0.84rem;
+  font-weight: 800;
+  gap: 8px;
+}
+
+.agent-active-choice input {
+  accent-color: #1f6f5b;
+  min-height: auto;
+  width: auto;
+}
+
+.agent-config-fields {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1fr);
+}
+
+.agent-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.small-button {
+  align-items: center;
+  background: #edf2ea;
+  border: 1px solid #d6dfd2;
+  border-radius: 8px;
+  color: #314038;
+  display: inline-flex;
+  font-size: 0.82rem;
+  font-weight: 800;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 11px;
+}
+
+.small-button.danger {
+  background: #fff1ed;
+  border-color: #f0c9bd;
+  color: #7a2e25;
 }
 
 .meter-row,
@@ -607,6 +758,10 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
   .knowledge-panel {
     min-height: auto;
   }
@@ -630,6 +785,27 @@ textarea:focus {
 
   .topbar {
     gap: 14px;
+  }
+
+  .topbar-actions,
+  .agent-config-fields,
+  .agent-create-form {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar-actions {
+    align-items: stretch;
+    display: grid;
+    width: 100%;
+  }
+
+  .view-tabs {
+    justify-content: stretch;
+  }
+
+  .view-tabs button {
+    justify-content: center;
+    width: 100%;
   }
 
   .workspace-panel {

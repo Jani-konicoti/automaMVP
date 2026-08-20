@@ -1,6 +1,6 @@
-# Centralino AI MVP
+# JK Automa
 
-MVP per demo: React + Python/FastAPI + ElevenLabs Conversational AI.
+Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 
 ## Cosa fa
 
@@ -21,12 +21,18 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Compila `backend/.env`:
+Compila `backend/.env` solo per impostazioni tecniche locali:
 
 ```env
-ELEVENLABS_API_KEY=...
-ELEVENLABS_AGENT_ID=agent_...
+FRONTEND_ORIGIN=http://localhost:5173
+ELEVENLABS_VERIFY_SSL=true
 ```
+
+Le credenziali ElevenLabs si configurano dall'app nella pagina `Configurazione`:
+
+- `ElevenLabs API key`
+- uno o piu `agent_id`
+- agente attivo da usare per la conversazione
 
 Avvio:
 
@@ -65,4 +71,4 @@ Nel prompt base dell'agente puoi mettere una frase minima, ad esempio:
 You are an Italian receptionist. Follow the session prompt and use the available tools when needed.
 ```
 
-Per questa demo il frontend passa comportamento e documentazione come contextual update all'inizio della sessione, evitando vector store e ricerche esterne.
+Il frontend passa il contesto operativo all'inizio della sessione e usa i tool configurati per appuntamenti e knowledge.

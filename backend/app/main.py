@@ -27,8 +27,6 @@ KNOWLEDGE_PATH = DATA_DIR / "knowledge.txt"
 BEHAVIOR_PATH = DATA_DIR / "behavior.txt"
 DOCUMENTATION_PATH = DATA_DIR / "documentation.txt"
 
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID", "")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 ELEVENLABS_VERIFY_SSL = os.getenv("ELEVENLABS_VERIFY_SSL", "true").lower() not in {
     "0",
@@ -43,7 +41,7 @@ DEV_ORIGINS = {
     "http://127.0.0.1:5174",
 }
 
-app = FastAPI(title="Centralino AI MVP")
+app = FastAPI(title="JK Automa")
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,6 +77,29 @@ class BotBehavior(BotBehaviorIn):
     is_active: bool
     created_at: str
     updated_at: str
+
+
+class ElevenLabsAgentIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    agent_id: str = Field(min_length=1, max_length=180)
+
+
+class ElevenLabsAgent(ElevenLabsAgentIn):
+    id: int
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class ElevenLabsConfigIn(BaseModel):
+    api_key: str = Field(default="", max_length=300)
+
+
+class ElevenLabsConfig(BaseModel):
+    api_key: str
+    agents: list[ElevenLabsAgent]
+    active_agent_id: str | None
+    configured: bool
 
 
 class VectorStoreStats(BaseModel):
@@ -187,7 +208,7 @@ def ensure_storage() -> None:
                 "Non dire mai l'ID dell'appuntamento."
             )
             documentation = (
-                "Siamo uno studio demo. Orari: lunedi-venerdi 09:00-18:00."
+                "Siamo JK Automa. Orari: lunedi-venerdi 09:00-18:00."
             )
 
         if not BEHAVIOR_PATH.exists():
@@ -239,6 +260,27 @@ def ensure_storage() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS elevenlabs_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                api_key TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS elevenlabs_agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         behaviors_count = conn.execute("SELECT COUNT(*) FROM bot_behaviors").fetchone()[0]
         if behaviors_count == 0:
             now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -249,6 +291,26 @@ def ensure_storage() -> None:
                 VALUES (?, ?, 1, ?, ?)
                 """,
                 ("Predefinito", content, now, now),
+            )
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        config_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_config").fetchone()[0]
+        if config_count == 0:
+            conn.execute(
+                """
+                INSERT INTO elevenlabs_config (id, api_key, updated_at)
+                VALUES (1, ?, ?)
+                """,
+                (os.getenv("ELEVENLABS_API_KEY", "").strip(), now),
+            )
+        agents_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_agents").fetchone()[0]
+        env_agent_id = os.getenv("ELEVENLABS_AGENT_ID", "").strip()
+        if agents_count == 0 and env_agent_id:
+            conn.execute(
+                """
+                INSERT INTO elevenlabs_agents (name, agent_id, is_active, created_at, updated_at)
+                VALUES (?, ?, 1, ?, ?)
+                """,
+                ("Agente principale", env_agent_id, now, now),
             )
         conn.commit()
 
@@ -302,6 +364,66 @@ def update_active_bot_behavior(content: str) -> None:
                 ("Predefinito", content, now, now),
             )
         conn.commit()
+
+
+def row_to_elevenlabs_agent(row: sqlite3.Row) -> ElevenLabsAgent:
+    return ElevenLabsAgent(
+        id=row["id"],
+        name=row["name"],
+        agent_id=row["agent_id"],
+        is_active=bool(row["is_active"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def list_elevenlabs_agents() -> list[ElevenLabsAgent]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT * FROM elevenlabs_agents
+            ORDER BY is_active DESC, updated_at DESC, id DESC
+            """
+        ).fetchall()
+
+    return [row_to_elevenlabs_agent(row) for row in rows]
+
+
+def get_elevenlabs_config_payload() -> ElevenLabsConfig:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        config = conn.execute(
+            "SELECT api_key FROM elevenlabs_config WHERE id = 1"
+        ).fetchone()
+
+    api_key = config["api_key"] if config else ""
+    agents = list_elevenlabs_agents()
+    active_agent = next((agent for agent in agents if agent.is_active), None)
+    return ElevenLabsConfig(
+        api_key=api_key,
+        agents=agents,
+        active_agent_id=active_agent.agent_id if active_agent else None,
+        configured=bool(api_key and active_agent),
+    )
+
+
+def get_active_elevenlabs_credentials() -> tuple[str, str]:
+    config = get_elevenlabs_config_payload()
+    if not config.active_agent_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Configura almeno un agent_id ElevenLabs attivo",
+        )
+    if not config.api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Configura ELEVENLABS_API_KEY nella pagina Configurazione",
+        )
+
+    return config.api_key, config.active_agent_id
 
 
 def row_to_appointment(row: sqlite3.Row) -> Appointment:
@@ -541,10 +663,11 @@ def on_startup() -> None:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    config = get_elevenlabs_config_payload()
     return {
         "ok": True,
-        "agent_configured": bool(ELEVENLABS_AGENT_ID),
-        "signed_url_available": bool(ELEVENLABS_AGENT_ID and ELEVENLABS_API_KEY),
+        "agent_configured": bool(config.active_agent_id),
+        "signed_url_available": config.configured,
     }
 
 
@@ -687,7 +810,7 @@ async def upload_pdf_knowledge(
 
     contents = await file.read()
     if len(contents) > 12 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="PDF is too large for this MVP")
+        raise HTTPException(status_code=400, detail="PDF is too large")
 
     extracted_text, pages = extract_pdf_text(contents)
     behavior = BEHAVIOR_PATH.read_text(encoding="utf-8").strip()
@@ -739,7 +862,7 @@ async def upload_pdf_vector_store(
 
     contents = await file.read()
     if len(contents) > 24 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="PDF is too large for this MVP")
+        raise HTTPException(status_code=400, detail="PDF is too large")
 
     extracted_text, pages = extract_pdf_text(contents)
     source = file.filename or "documento.pdf"
@@ -764,16 +887,157 @@ def search_vector_store(
     return VectorSearchResponse(results=search_vector_chunks(q, limit, source))
 
 
+@app.get("/api/elevenlabs/config", response_model=ElevenLabsConfig)
+def get_elevenlabs_config() -> ElevenLabsConfig:
+    return get_elevenlabs_config_payload()
+
+
+@app.put("/api/elevenlabs/config", response_model=ElevenLabsConfig)
+def save_elevenlabs_config(payload: ElevenLabsConfigIn) -> ElevenLabsConfig:
+    ensure_storage()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO elevenlabs_config (id, api_key, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET api_key = excluded.api_key, updated_at = excluded.updated_at
+            """,
+            (payload.api_key.strip(), now),
+        )
+        conn.commit()
+
+    return get_elevenlabs_config_payload()
+
+
+@app.post("/api/elevenlabs/agents", response_model=ElevenLabsAgent)
+def create_elevenlabs_agent(payload: ElevenLabsAgentIn) -> ElevenLabsAgent:
+    ensure_storage()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        agents_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_agents").fetchone()[0]
+        cursor = conn.execute(
+            """
+            INSERT INTO elevenlabs_agents (name, agent_id, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                payload.name.strip(),
+                payload.agent_id.strip(),
+                1 if agents_count == 0 else 0,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM elevenlabs_agents WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    return row_to_elevenlabs_agent(row)
+
+
+@app.put("/api/elevenlabs/agents/{agent_row_id}", response_model=ElevenLabsAgent)
+def update_elevenlabs_agent(
+    agent_row_id: int,
+    payload: ElevenLabsAgentIn,
+) -> ElevenLabsAgent:
+    ensure_storage()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM elevenlabs_agents WHERE id = ?",
+            (agent_row_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        conn.execute(
+            """
+            UPDATE elevenlabs_agents
+            SET name = ?, agent_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (payload.name.strip(), payload.agent_id.strip(), now, agent_row_id),
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM elevenlabs_agents WHERE id = ?",
+            (agent_row_id,),
+        ).fetchone()
+
+    return row_to_elevenlabs_agent(updated)
+
+
+@app.post("/api/elevenlabs/agents/{agent_row_id}/activate", response_model=ElevenLabsAgent)
+def activate_elevenlabs_agent(agent_row_id: int) -> ElevenLabsAgent:
+    ensure_storage()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM elevenlabs_agents WHERE id = ?",
+            (agent_row_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        conn.execute("UPDATE elevenlabs_agents SET is_active = 0")
+        conn.execute(
+            """
+            UPDATE elevenlabs_agents
+            SET is_active = 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, agent_row_id),
+        )
+        conn.commit()
+        active = conn.execute(
+            "SELECT * FROM elevenlabs_agents WHERE id = ?",
+            (agent_row_id,),
+        ).fetchone()
+
+    return row_to_elevenlabs_agent(active)
+
+
+@app.delete("/api/elevenlabs/agents/{agent_row_id}", response_model=ElevenLabsConfig)
+def delete_elevenlabs_agent(agent_row_id: int) -> ElevenLabsConfig:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM elevenlabs_agents WHERE id = ?",
+            (agent_row_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        was_active = bool(row["is_active"])
+        conn.execute("DELETE FROM elevenlabs_agents WHERE id = ?", (agent_row_id,))
+        if was_active:
+            replacement = conn.execute(
+                "SELECT id FROM elevenlabs_agents ORDER BY updated_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+            if replacement:
+                conn.execute(
+                    "UPDATE elevenlabs_agents SET is_active = 1 WHERE id = ?",
+                    (replacement["id"],),
+                )
+        conn.commit()
+
+    return get_elevenlabs_config_payload()
+
+
 @app.get("/api/elevenlabs/signed-url")
 async def get_signed_url() -> dict[str, str]:
-    if not ELEVENLABS_AGENT_ID:
-        raise HTTPException(status_code=500, detail="ELEVENLABS_AGENT_ID is missing")
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(status_code=500, detail="ELEVENLABS_API_KEY is missing")
+    api_key, agent_id = get_active_elevenlabs_credentials()
 
     url = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url"
-    headers = {"xi-api-key": ELEVENLABS_API_KEY}
-    params = {"agent_id": ELEVENLABS_AGENT_ID}
+    headers = {"xi-api-key": api_key}
+    params = {"agent_id": agent_id}
 
     try:
         async with httpx.AsyncClient(timeout=15, verify=ELEVENLABS_VERIFY_SSL) as client:
@@ -800,12 +1064,11 @@ async def get_signed_url() -> dict[str, str]:
 
 @app.get("/api/elevenlabs/conversation-token")
 async def get_conversation_token() -> dict[str, str]:
-    if not ELEVENLABS_AGENT_ID:
-        raise HTTPException(status_code=500, detail="ELEVENLABS_AGENT_ID is missing")
+    api_key, agent_id = get_active_elevenlabs_credentials()
 
     url = "https://api.elevenlabs.io/v1/convai/conversation/token"
-    headers = {"xi-api-key": ELEVENLABS_API_KEY} if ELEVENLABS_API_KEY else {}
-    params = {"agent_id": ELEVENLABS_AGENT_ID}
+    headers = {"xi-api-key": api_key}
+    params = {"agent_id": agent_id}
 
     try:
         async with httpx.AsyncClient(timeout=15, verify=ELEVENLABS_VERIFY_SSL) as client:

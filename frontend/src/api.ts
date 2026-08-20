@@ -24,6 +24,27 @@ export type Knowledge = {
   documentation: string;
 };
 
+export type ElevenLabsAgent = {
+  id: number;
+  name: string;
+  agent_id: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ElevenLabsConfig = {
+  api_key: string;
+  agents: ElevenLabsAgent[];
+  active_agent_id?: string | null;
+  configured: boolean;
+};
+
+export type ElevenLabsAgentInput = {
+  name: string;
+  agent_id: string;
+};
+
 export type VectorStoreStats = {
   chunks: number;
   sources: number;
@@ -69,6 +90,43 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export function getKnowledge() {
   return request<Knowledge>("/api/knowledge");
+}
+
+export function getElevenLabsConfig() {
+  return request<ElevenLabsConfig>("/api/elevenlabs/config");
+}
+
+export function saveElevenLabsConfig(api_key: string) {
+  return request<ElevenLabsConfig>("/api/elevenlabs/config", {
+    method: "PUT",
+    body: JSON.stringify({ api_key }),
+  });
+}
+
+export function createElevenLabsAgent(input: ElevenLabsAgentInput) {
+  return request<ElevenLabsAgent>("/api/elevenlabs/agents", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateElevenLabsAgent(id: number, input: ElevenLabsAgentInput) {
+  return request<ElevenLabsAgent>(`/api/elevenlabs/agents/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function activateElevenLabsAgent(id: number) {
+  return request<ElevenLabsAgent>(`/api/elevenlabs/agents/${id}/activate`, {
+    method: "POST",
+  });
+}
+
+export function deleteElevenLabsAgent(id: number) {
+  return request<ElevenLabsConfig>(`/api/elevenlabs/agents/${id}`, {
+    method: "DELETE",
+  });
 }
 
 export async function uploadVectorStorePdf(file: File, mode: "append" | "replace") {

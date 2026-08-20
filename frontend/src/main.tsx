@@ -8,29 +8,43 @@ import {
 } from "@elevenlabs/react";
 import {
   CalendarClock,
+  Check,
   Database,
   Loader2,
   Mic,
   MicOff,
   PhoneCall,
+  Plus,
+  Save,
   Send,
+  Settings,
   Square,
+  Trash2,
 } from "lucide-react";
 import {
   Appointment,
   AppointmentInput,
+  ElevenLabsAgent,
+  ElevenLabsAgentInput,
+  ElevenLabsConfig,
   Knowledge,
   VectorSearchResult,
   VectorStoreSource,
   VectorStoreStats,
+  activateElevenLabsAgent,
   createAppointment,
+  createElevenLabsAgent,
+  deleteElevenLabsAgent,
   getConversationToken,
+  getElevenLabsConfig,
   getKnowledge,
   getSignedUrl,
   getVectorStoreSources,
   getVectorStoreStats,
   listAppointments,
+  saveElevenLabsConfig,
   searchVectorStore,
+  updateElevenLabsAgent,
   uploadVectorStorePdf,
 } from "./api";
 import "./styles.css";
@@ -44,6 +58,7 @@ type RetrievalQuery = {
 };
 
 type CallScenario = "inbound" | "outbound";
+type AppView = "demo" | "config";
 
 function callScenarioLabel(callScenario: CallScenario) {
   return callScenario === "inbound" ? "chiamata in entrata" : "chiamata in uscita";
@@ -138,10 +153,17 @@ ${passages}
 }
 
 function App() {
+  const [appView, setAppView] = useState<AppView>("demo");
   const [knowledge, setKnowledge] = useState<Knowledge>({
     behavior:
       typeof window === "undefined" ? "" : window.localStorage.getItem(LOCAL_BEHAVIOR_KEY) ?? "",
     documentation: "",
+  });
+  const [elevenLabsConfig, setElevenLabsConfig] = useState<ElevenLabsConfig>({
+    api_key: "",
+    agents: [],
+    active_agent_id: null,
+    configured: false,
   });
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [messages, setMessages] = useState<string[]>([]);
@@ -167,15 +189,17 @@ function App() {
   useEffect(() => {
     Promise.all([
       getKnowledge(),
+      getElevenLabsConfig(),
       listAppointments(),
       getVectorStoreStats(),
       getVectorStoreSources(),
     ])
-      .then(([knowledgeResponse, appointmentRows, stats, sources]) => {
+      .then(([knowledgeResponse, configResponse, appointmentRows, stats, sources]) => {
         setKnowledge((current) => ({
           behavior: current.behavior || knowledgeResponse.behavior,
           documentation: knowledgeResponse.documentation,
         }));
+        setElevenLabsConfig(configResponse);
         setAppointments(appointmentRows);
         setVectorStats(stats);
         setVectorSources(sources);
@@ -184,6 +208,51 @@ function App() {
         setError(err instanceof Error ? err.message : "Errore di inizializzazione");
       })
       .finally(() => setIsLoading(false));
+  }, []);
+
+  const refreshElevenLabsConfig = useCallback(async () => {
+    const config = await getElevenLabsConfig();
+    setElevenLabsConfig(config);
+    return config;
+  }, []);
+
+  const handleSaveElevenLabsApiKey = useCallback(async (apiKey: string) => {
+    setError(null);
+    const config = await saveElevenLabsConfig(apiKey);
+    setElevenLabsConfig(config);
+  }, []);
+
+  const handleCreateElevenLabsAgent = useCallback(
+    async (input: ElevenLabsAgentInput) => {
+      setError(null);
+      await createElevenLabsAgent(input);
+      await refreshElevenLabsConfig();
+    },
+    [refreshElevenLabsConfig],
+  );
+
+  const handleUpdateElevenLabsAgent = useCallback(
+    async (id: number, input: ElevenLabsAgentInput) => {
+      setError(null);
+      await updateElevenLabsAgent(id, input);
+      await refreshElevenLabsConfig();
+    },
+    [refreshElevenLabsConfig],
+  );
+
+  const handleActivateElevenLabsAgent = useCallback(
+    async (id: number) => {
+      setError(null);
+      await activateElevenLabsAgent(id);
+      await refreshElevenLabsConfig();
+    },
+    [refreshElevenLabsConfig],
+  );
+
+  const handleDeleteElevenLabsAgent = useCallback(async (id: number) => {
+    setError(null);
+    const config = await deleteElevenLabsAgent(id);
+    setElevenLabsConfig(config);
   }, []);
 
   useEffect(() => {
@@ -321,17 +390,25 @@ function App() {
   return (
     <ConversationProvider {...providerConfig}>
       <Shell
+        appView={appView}
         appointments={appointments}
         error={error}
         isLoading={isLoading}
+        elevenLabsConfig={elevenLabsConfig}
         knowledge={knowledge}
         messages={messages}
         callScenario={callScenario}
+        onAppViewChange={setAppView}
         onKnowledgeChange={(value) => {
           window.localStorage.setItem(LOCAL_BEHAVIOR_KEY, value.behavior);
           setKnowledge(value);
         }}
         onCallScenarioChange={setCallScenario}
+        onActivateElevenLabsAgent={handleActivateElevenLabsAgent}
+        onCreateElevenLabsAgent={handleCreateElevenLabsAgent}
+        onDeleteElevenLabsAgent={handleDeleteElevenLabsAgent}
+        onSaveElevenLabsApiKey={handleSaveElevenLabsApiKey}
+        onUpdateElevenLabsAgent={handleUpdateElevenLabsAgent}
         onPdfModeChange={setPdfMode}
         onVectorPdfUpload={handleVectorPdfUpload}
         onVectorSourceChange={setSelectedVectorSource}
@@ -349,7 +426,9 @@ function App() {
 }
 
 type ShellProps = {
+  appView: AppView;
   appointments: Appointment[];
+  elevenLabsConfig: ElevenLabsConfig;
   error: string | null;
   isLoading: boolean;
   isIndexingPdf: boolean;
@@ -362,16 +441,24 @@ type ShellProps = {
   vectorSources: VectorStoreSource[];
   selectedVectorSource: string | null;
   retrievalQuery: RetrievalQuery | null;
+  onAppViewChange: (value: AppView) => void;
+  onActivateElevenLabsAgent: (id: number) => Promise<void>;
   onCallScenarioChange: (value: CallScenario) => void;
+  onCreateElevenLabsAgent: (input: ElevenLabsAgentInput) => Promise<void>;
+  onDeleteElevenLabsAgent: (id: number) => Promise<void>;
   onKnowledgeChange: (value: Knowledge) => void;
   onPdfModeChange: (value: "append" | "replace") => void;
+  onSaveElevenLabsApiKey: (apiKey: string) => Promise<void>;
+  onUpdateElevenLabsAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
   onVectorPdfUpload: (files: File[]) => Promise<void>;
   onVectorSourceChange: (source: string | null) => void;
   onSetError: (value: string | null) => void;
 };
 
 function Shell({
+  appView,
   appointments,
+  elevenLabsConfig,
   error,
   isLoading,
   isIndexingPdf,
@@ -384,9 +471,15 @@ function Shell({
   vectorSources,
   selectedVectorSource,
   retrievalQuery,
+  onAppViewChange,
+  onActivateElevenLabsAgent,
   onCallScenarioChange,
+  onCreateElevenLabsAgent,
+  onDeleteElevenLabsAgent,
   onKnowledgeChange,
   onPdfModeChange,
+  onSaveElevenLabsApiKey,
+  onUpdateElevenLabsAgent,
   onVectorPdfUpload,
   onVectorSourceChange,
   onSetError,
@@ -397,10 +490,29 @@ function Shell({
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Demo MVP</p>
-          <h1>Centralino AI</h1>
+          <p className="eyebrow">JK Automa</p>
+          <h1>JK Automa</h1>
         </div>
-        <StatusPill />
+        <div className="topbar-actions">
+          <div className="view-tabs">
+            <button
+              className={appView === "demo" ? "active" : ""}
+              type="button"
+              onClick={() => onAppViewChange("demo")}
+            >
+              Demo
+            </button>
+            <button
+              className={appView === "config" ? "active" : ""}
+              type="button"
+              onClick={() => onAppViewChange("config")}
+            >
+              <Settings size={16} />
+              Configurazione
+            </button>
+          </div>
+          <StatusPill />
+        </div>
       </header>
 
       {error && (
@@ -412,6 +524,18 @@ function Shell({
         </div>
       )}
 
+      {appView === "config" ? (
+        <ConfigPage
+          config={elevenLabsConfig}
+          isLoading={isLoading}
+          onActivateAgent={onActivateElevenLabsAgent}
+          onCreateAgent={onCreateElevenLabsAgent}
+          onDeleteAgent={onDeleteElevenLabsAgent}
+          onSaveApiKey={onSaveElevenLabsApiKey}
+          onSetError={onSetError}
+          onUpdateAgent={onUpdateElevenLabsAgent}
+        />
+      ) : (
       <section className="main-grid">
         <div className="workspace-panel knowledge-panel">
           <div className="panel-heading">
@@ -538,7 +662,9 @@ function Shell({
         <div className="right-column">
           <VoicePanel
             callScenario={callScenario}
+            elevenLabsConfig={elevenLabsConfig}
             onCallScenarioChange={onCallScenarioChange}
+            onSetError={onSetError}
             retrievalQuery={retrievalQuery}
             selectedVectorSource={selectedVectorSource}
           />
@@ -546,18 +672,275 @@ function Shell({
           <DebugPanel messages={messages} />
         </div>
       </section>
+      )}
     </main>
+  );
+}
+
+function ConfigPage({
+  config,
+  isLoading,
+  onActivateAgent,
+  onCreateAgent,
+  onDeleteAgent,
+  onSaveApiKey,
+  onSetError,
+  onUpdateAgent,
+}: {
+  config: ElevenLabsConfig;
+  isLoading: boolean;
+  onActivateAgent: (id: number) => Promise<void>;
+  onCreateAgent: (input: ElevenLabsAgentInput) => Promise<void>;
+  onDeleteAgent: (id: number) => Promise<void>;
+  onSaveApiKey: (apiKey: string) => Promise<void>;
+  onSetError: (value: string | null) => void;
+  onUpdateAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
+}) {
+  const [apiKey, setApiKey] = useState(config.api_key);
+  const [newAgentName, setNewAgentName] = useState("");
+  const [newAgentId, setNewAgentId] = useState("");
+  const [isSavingKey, setIsSavingKey] = useState(false);
+  const [isCreatingAgent, setIsCreatingAgent] = useState(false);
+
+  useEffect(() => {
+    setApiKey(config.api_key);
+  }, [config.api_key]);
+
+  const handleSaveApiKey = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setIsSavingKey(true);
+    try {
+      await onSaveApiKey(apiKey);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Salvataggio API key fallito");
+    } finally {
+      setIsSavingKey(false);
+    }
+  };
+
+  const handleCreateAgent = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = newAgentName.trim();
+    const agentId = newAgentId.trim();
+    if (!name || !agentId) {
+      return;
+    }
+
+    setIsCreatingAgent(true);
+    try {
+      await onCreateAgent({ name, agent_id: agentId });
+      setNewAgentName("");
+      setNewAgentId("");
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Creazione agente fallita");
+    } finally {
+      setIsCreatingAgent(false);
+    }
+  };
+
+  return (
+    <section className="config-grid">
+      <div className="workspace-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">ElevenLabs</p>
+            <h2>Credenziali</h2>
+          </div>
+          <Settings size={22} />
+        </div>
+
+        <form className="config-form" onSubmit={handleSaveApiKey}>
+          <label className="field-label" htmlFor="elevenlabs-api-key">
+            ElevenLabs API key
+          </label>
+          <input
+            disabled={isLoading || isSavingKey}
+            id="elevenlabs-api-key"
+            type="text"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+          />
+          <button className="action-button compact-action" disabled={isSavingKey} type="submit">
+            {isSavingKey ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
+            Salva API key
+          </button>
+        </form>
+
+        <div className={`config-status ${config.configured ? "ready" : ""}`}>
+          {config.configured
+            ? `Configurazione attiva: ${config.active_agent_id}`
+            : "Inserisci API key e attiva almeno un agente."}
+        </div>
+      </div>
+
+      <div className="workspace-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Agenti</p>
+            <h2>Agent ID disponibili</h2>
+          </div>
+          <PhoneCall size={22} />
+        </div>
+
+        <form className="agent-create-form" onSubmit={handleCreateAgent}>
+          <input
+            disabled={isCreatingAgent}
+            placeholder="Nome agente"
+            value={newAgentName}
+            onChange={(event) => setNewAgentName(event.target.value)}
+          />
+          <input
+            disabled={isCreatingAgent}
+            placeholder="agent_..."
+            value={newAgentId}
+            onChange={(event) => setNewAgentId(event.target.value)}
+          />
+          <button
+            className="pdf-upload-button"
+            disabled={isCreatingAgent || !newAgentName.trim() || !newAgentId.trim()}
+            type="submit"
+          >
+            {isCreatingAgent ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
+            Aggiungi
+          </button>
+        </form>
+
+        <div className="agent-config-list">
+          {config.agents.length === 0 ? (
+            <p className="muted">Nessun agent_id salvato.</p>
+          ) : (
+            config.agents.map((agent) => (
+              <AgentConfigCard
+                agent={agent}
+                key={agent.id}
+                onActivate={onActivateAgent}
+                onDelete={onDeleteAgent}
+                onSetError={onSetError}
+                onUpdate={onUpdateAgent}
+              />
+            ))
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AgentConfigCard({
+  agent,
+  onActivate,
+  onDelete,
+  onSetError,
+  onUpdate,
+}: {
+  agent: ElevenLabsAgent;
+  onActivate: (id: number) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+  onSetError: (value: string | null) => void;
+  onUpdate: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
+}) {
+  const [name, setName] = useState(agent.name);
+  const [agentId, setAgentId] = useState(agent.agent_id);
+  const [isBusy, setIsBusy] = useState(false);
+
+  useEffect(() => {
+    setName(agent.name);
+    setAgentId(agent.agent_id);
+  }, [agent.agent_id, agent.name]);
+
+  const handleUpdate = async () => {
+    setIsBusy(true);
+    try {
+      await onUpdate(agent.id, { name: name.trim(), agent_id: agentId.trim() });
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Aggiornamento agente fallito");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleActivate = async () => {
+    setIsBusy(true);
+    try {
+      await onActivate(agent.id);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Attivazione agente fallita");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    setIsBusy(true);
+    try {
+      await onDelete(agent.id);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Eliminazione agente fallita");
+      setIsBusy(false);
+    }
+  };
+
+  return (
+    <article className={`agent-config-card ${agent.is_active ? "active" : ""}`}>
+      <label className="agent-active-choice">
+        <input
+          checked={agent.is_active}
+          disabled={isBusy}
+          name="active-agent"
+          type="radio"
+          onChange={handleActivate}
+        />
+        <span>{agent.is_active ? "Attivo" : "Usa questo agente"}</span>
+      </label>
+      <div className="agent-config-fields">
+        <input
+          disabled={isBusy}
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+        />
+        <input
+          disabled={isBusy}
+          value={agentId}
+          onChange={(event) => setAgentId(event.target.value)}
+        />
+      </div>
+      <div className="agent-config-actions">
+        <button
+          className="small-button"
+          disabled={isBusy || !name.trim() || !agentId.trim()}
+          type="button"
+          onClick={handleUpdate}
+        >
+          {isBusy ? <Loader2 className="spin" size={15} /> : <Save size={15} />}
+          Aggiorna
+        </button>
+        {!agent.is_active && (
+          <button className="small-button" disabled={isBusy} type="button" onClick={handleActivate}>
+            <Check size={15} />
+            Attiva
+          </button>
+        )}
+        <button className="small-button danger" disabled={isBusy} type="button" onClick={handleDelete}>
+          <Trash2 size={15} />
+          Elimina
+        </button>
+      </div>
+    </article>
   );
 }
 
 function VoicePanel({
   callScenario,
+  elevenLabsConfig,
   onCallScenarioChange,
+  onSetError,
   retrievalQuery,
   selectedVectorSource,
 }: {
   callScenario: CallScenario;
+  elevenLabsConfig: ElevenLabsConfig;
   onCallScenarioChange: (value: CallScenario) => void;
+  onSetError: (value: string | null) => void;
   retrievalQuery: RetrievalQuery | null;
   selectedVectorSource: string | null;
 }) {
@@ -578,6 +961,7 @@ function VoicePanel({
   const lastContextUpdateRef = useRef("");
   const lastRetrievalIdRef = useRef<number | null>(null);
   const isConnected = status === "connected";
+  const activeAgent = elevenLabsConfig.agents.find((agent) => agent.is_active);
 
   useEffect(() => {
     if (!isConnected) {
@@ -651,8 +1035,14 @@ function VoicePanel({
   }, [connectionMode, isConnected, retrievalQuery, selectedVectorSource, sendContextualUpdate]);
 
   const handleStart = async () => {
+    if (!elevenLabsConfig.configured) {
+      onSetError("Configura API key ElevenLabs e almeno un agent_id attivo.");
+      return;
+    }
+
     setIsStarting(true);
     try {
+      onSetError(null);
       if (connectionMode === "webrtc") {
         const response = await getConversationToken();
         await startSession({
@@ -668,6 +1058,8 @@ function VoicePanel({
           textOnly: false,
         });
       }
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Avvio sessione fallito");
     } finally {
       setIsStarting(false);
     }
@@ -703,6 +1095,9 @@ function VoicePanel({
       </div>
       <div className="voice-stats compact">
         <span>Modalita: {mode ?? "idle"}</span>
+      </div>
+      <div className="voice-stats compact">
+        <span>Agente: {activeAgent?.name || "non configurato"}</span>
       </div>
 
       <div className="input-meter" aria-label="Livello microfono">
@@ -756,7 +1151,7 @@ function VoicePanel({
       ) : (
         <button
           className="action-button"
-          disabled={isStarting}
+          disabled={isStarting || !elevenLabsConfig.configured}
           type="button"
           onClick={handleStart}
         >
