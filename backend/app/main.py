@@ -41,7 +41,7 @@ DEV_ORIGINS = {
     "http://127.0.0.1:5174",
 }
 
-app = FastAPI(title="JK Automa")
+app = FastAPI(title="CP DEMO")
 
 app.add_middleware(
     CORSMiddleware,
@@ -208,7 +208,7 @@ def ensure_storage() -> None:
                 "Non dire mai l'ID dell'appuntamento."
             )
             documentation = (
-                "Siamo JK Automa. Orari: lunedi-venerdi 09:00-18:00."
+                "Siamo CP DEMO. Orari: lunedi-venerdi 09:00-18:00."
             )
 
         if not BEHAVIOR_PATH.exists():
@@ -424,6 +424,27 @@ def get_active_elevenlabs_credentials() -> tuple[str, str]:
         )
 
     return config.api_key, config.active_agent_id
+
+
+def get_elevenlabs_credentials(agent_id: str | None = None) -> tuple[str, str]:
+    config = get_elevenlabs_config_payload()
+    selected_agent_id = agent_id.strip() if agent_id else config.active_agent_id
+    if not selected_agent_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Configura almeno un agent_id ElevenLabs",
+        )
+    if not config.api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Configura ELEVENLABS_API_KEY nella pagina Configurazione",
+        )
+
+    configured_agent_ids = {agent.agent_id for agent in config.agents}
+    if selected_agent_id not in configured_agent_ids:
+        raise HTTPException(status_code=404, detail="Agent ID non trovato in configurazione")
+
+    return config.api_key, selected_agent_id
 
 
 def row_to_appointment(row: sqlite3.Row) -> Appointment:
@@ -1032,12 +1053,14 @@ def delete_elevenlabs_agent(agent_row_id: int) -> ElevenLabsConfig:
 
 
 @app.get("/api/elevenlabs/signed-url")
-async def get_signed_url() -> dict[str, str]:
-    api_key, agent_id = get_active_elevenlabs_credentials()
+async def get_signed_url(
+    agent_id: str | None = Query(default=None, min_length=1, max_length=180),
+) -> dict[str, str]:
+    api_key, selected_agent_id = get_elevenlabs_credentials(agent_id)
 
     url = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url"
     headers = {"xi-api-key": api_key}
-    params = {"agent_id": agent_id}
+    params = {"agent_id": selected_agent_id}
 
     try:
         async with httpx.AsyncClient(timeout=15, verify=ELEVENLABS_VERIFY_SSL) as client:
@@ -1063,12 +1086,14 @@ async def get_signed_url() -> dict[str, str]:
 
 
 @app.get("/api/elevenlabs/conversation-token")
-async def get_conversation_token() -> dict[str, str]:
-    api_key, agent_id = get_active_elevenlabs_credentials()
+async def get_conversation_token(
+    agent_id: str | None = Query(default=None, min_length=1, max_length=180),
+) -> dict[str, str]:
+    api_key, selected_agent_id = get_elevenlabs_credentials(agent_id)
 
     url = "https://api.elevenlabs.io/v1/convai/conversation/token"
     headers = {"xi-api-key": api_key}
-    params = {"agent_id": agent_id}
+    params = {"agent_id": selected_agent_id}
 
     try:
         async with httpx.AsyncClient(timeout=15, verify=ELEVENLABS_VERIFY_SSL) as client:

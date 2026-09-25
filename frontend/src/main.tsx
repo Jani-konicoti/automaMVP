@@ -59,6 +59,8 @@ type RetrievalQuery = {
 
 type CallScenario = "inbound" | "outbound";
 type AppView = "demo" | "config";
+type MainTab = "fonti" | "centralino" | "presentazione";
+type VoiceContext = "centralino" | "presentazione";
 
 function callScenarioLabel(callScenario: CallScenario) {
   return callScenario === "inbound" ? "chiamata in entrata" : "chiamata in uscita";
@@ -100,6 +102,26 @@ function getUserMessage(value: unknown) {
   return null;
 }
 
+function getAgentMessage(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const event = value as Record<string, unknown>;
+  const message = event.message;
+  const source = event.source;
+  const role = event.role;
+  if (
+    typeof message === "string" &&
+    message.trim() &&
+    (source === "ai" || source === "agent" || role === "agent")
+  ) {
+    return message.trim();
+  }
+
+  return null;
+}
+
 function buildContextUpdate(
   selectedVectorSource: string | null,
   callScenario: CallScenario,
@@ -129,6 +151,24 @@ function buildRealtimeContextUpdate(
 Scenario corrente: ${callScenarioLabel(callScenario)}.
 Fonte PDF attiva: ${selectedVectorSource || "tutte le fonti"}.
 Per domande su documenti o PDF usa il tool searchKnowledge prima di rispondere.
+`.trim();
+}
+
+function buildPresentationContextUpdate(selectedVectorSource: string | null) {
+  return `
+Modalita corrente: presentazione prodotto.
+Fonte PDF attiva: ${selectedVectorSource || "tutte le fonti"}.
+Usa il tool searchKnowledge prima di presentare funzionalita, benefici, casi d'uso o dettagli commerciali.
+Presenta il prodotto in sezioni fluide e professionali, senza inventare informazioni non presenti nella documentazione.
+`.trim();
+}
+
+function buildPresentationStartPrompt(selectedVectorSource: string | null) {
+  return `
+Avvia una presentazione commerciale del prodotto usando la fonte PDF attiva: ${
+    selectedVectorSource || "tutte le fonti"
+  }.
+Prima recupera le informazioni principali con searchKnowledge. Poi presenta introduzione, problema risolto, funzionalita principali, benefici, casi d'uso e chiusura.
 `.trim();
 }
 
@@ -167,6 +207,7 @@ function App() {
   });
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [messages, setMessages] = useState<string[]>([]);
+  const [presentationTranscript, setPresentationTranscript] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pdfMode, setPdfMode] = useState<"append" | "replace">("append");
   const [callScenario, setCallScenario] = useState<CallScenario>("inbound");
@@ -180,6 +221,15 @@ function App() {
   const [isIndexingPdf, setIsIndexingPdf] = useState(false);
   const [vectorStatus, setVectorStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeVoiceContextRef = useRef<VoiceContext | null>(null);
+
+  const handleVoiceContextChange = useCallback((value: VoiceContext | null) => {
+    activeVoiceContextRef.current = value;
+  }, []);
+
+  const handleClearPresentationTranscript = useCallback(() => {
+    setPresentationTranscript([]);
+  }, []);
 
   const refreshAppointments = useCallback(async () => {
     const rows = await listAppointments();
@@ -355,6 +405,10 @@ function App() {
         if (userMessage) {
           setRetrievalQuery({ id: Date.now(), text: userMessage });
         }
+        const agentMessage = getAgentMessage(message);
+        if (agentMessage && activeVoiceContextRef.current === "presentazione") {
+          setPresentationTranscript((current) => [...current, agentMessage].slice(-80));
+        }
       },
       onConnect: (message: unknown) => {
         setMessages((current) => [`connect: ${readableEvent(message)}`, ...current].slice(0, 12));
@@ -362,6 +416,7 @@ function App() {
       onDisconnect: (message: unknown) => {
         const readable = readableEvent(message);
         setMessages((current) => [`disconnect: ${readable}`, ...current].slice(0, 12));
+        activeVoiceContextRef.current = null;
         if (readable && readable !== "{\"reason\":\"user\"}") {
           setError(`Sessione chiusa: ${readable}`);
         }
@@ -397,6 +452,7 @@ function App() {
         elevenLabsConfig={elevenLabsConfig}
         knowledge={knowledge}
         messages={messages}
+        presentationTranscript={presentationTranscript}
         callScenario={callScenario}
         onAppViewChange={setAppView}
         onKnowledgeChange={(value) => {
@@ -404,6 +460,7 @@ function App() {
           setKnowledge(value);
         }}
         onCallScenarioChange={setCallScenario}
+        onClearPresentationTranscript={handleClearPresentationTranscript}
         onActivateElevenLabsAgent={handleActivateElevenLabsAgent}
         onCreateElevenLabsAgent={handleCreateElevenLabsAgent}
         onDeleteElevenLabsAgent={handleDeleteElevenLabsAgent}
@@ -413,6 +470,7 @@ function App() {
         onVectorPdfUpload={handleVectorPdfUpload}
         onVectorSourceChange={setSelectedVectorSource}
         onSetError={setError}
+        onVoiceContextChange={handleVoiceContextChange}
         pdfMode={pdfMode}
         isIndexingPdf={isIndexingPdf}
         vectorStats={vectorStats}
@@ -434,6 +492,7 @@ type ShellProps = {
   isIndexingPdf: boolean;
   knowledge: Knowledge;
   messages: string[];
+  presentationTranscript: string[];
   callScenario: CallScenario;
   pdfMode: "append" | "replace";
   vectorStats: VectorStoreStats;
@@ -444,6 +503,7 @@ type ShellProps = {
   onAppViewChange: (value: AppView) => void;
   onActivateElevenLabsAgent: (id: number) => Promise<void>;
   onCallScenarioChange: (value: CallScenario) => void;
+  onClearPresentationTranscript: () => void;
   onCreateElevenLabsAgent: (input: ElevenLabsAgentInput) => Promise<void>;
   onDeleteElevenLabsAgent: (id: number) => Promise<void>;
   onKnowledgeChange: (value: Knowledge) => void;
@@ -452,6 +512,7 @@ type ShellProps = {
   onUpdateElevenLabsAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
   onVectorPdfUpload: (files: File[]) => Promise<void>;
   onVectorSourceChange: (source: string | null) => void;
+  onVoiceContextChange: (value: VoiceContext | null) => void;
   onSetError: (value: string | null) => void;
 };
 
@@ -464,6 +525,7 @@ function Shell({
   isIndexingPdf,
   knowledge,
   messages,
+  presentationTranscript,
   callScenario,
   pdfMode,
   vectorStats,
@@ -474,6 +536,7 @@ function Shell({
   onAppViewChange,
   onActivateElevenLabsAgent,
   onCallScenarioChange,
+  onClearPresentationTranscript,
   onCreateElevenLabsAgent,
   onDeleteElevenLabsAgent,
   onKnowledgeChange,
@@ -482,16 +545,18 @@ function Shell({
   onUpdateElevenLabsAgent,
   onVectorPdfUpload,
   onVectorSourceChange,
+  onVoiceContextChange,
   onSetError,
 }: ShellProps) {
   const vectorFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [mainTab, setMainTab] = useState<MainTab>("fonti");
 
   return (
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">JK Automa</p>
-          <h1>JK Automa</h1>
+          <p className="eyebrow">CP DEMO</p>
+          <h1>CP DEMO</h1>
         </div>
         <div className="topbar-actions">
           <div className="view-tabs">
@@ -536,26 +601,40 @@ function Shell({
           onUpdateAgent={onUpdateElevenLabsAgent}
         />
       ) : (
-      <section className="main-grid">
-        <div className="workspace-panel knowledge-panel">
+        <section className="main-workspace">
+          <div className="section-tabs">
+            <button
+              className={mainTab === "fonti" ? "active" : ""}
+              type="button"
+              onClick={() => setMainTab("fonti")}
+            >
+              Fonti
+            </button>
+            <button
+              className={mainTab === "centralino" ? "active" : ""}
+              type="button"
+              onClick={() => setMainTab("centralino")}
+            >
+              Centralino
+            </button>
+            <button
+              className={mainTab === "presentazione" ? "active" : ""}
+              type="button"
+              onClick={() => setMainTab("presentazione")}
+            >
+              Presentazione
+            </button>
+          </div>
+
+          {mainTab === "fonti" ? (
+            <div className="sources-layout">
+              <div className="workspace-panel sources-panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Knowledge PDF</p>
               <h2>Fonti dell'agente</h2>
             </div>
           </div>
-          <label className="field-label" htmlFor="behavior">
-            Comportamento del bot
-          </label>
-          <textarea
-            className="behavior-editor"
-            disabled={isLoading}
-            id="behavior"
-            value={knowledge.behavior}
-            onChange={(event) =>
-              onKnowledgeChange({ ...knowledge, behavior: event.target.value })
-            }
-          />
           <label className="field-label">
             Vector PDF
           </label>
@@ -641,7 +720,7 @@ function Shell({
                   <div>
                     <strong>{source.source}</strong>
                     <span>
-                      {source.chunks.toLocaleString("it-IT")} chunk ·{" "}
+                      {source.chunks.toLocaleString("it-IT")} chunk -{" "}
                       {source.chars.toLocaleString("it-IT")} caratteri
                     </span>
                   </div>
@@ -651,29 +730,245 @@ function Shell({
               ))}
             </div>
           )}
-          <div className="meter-row">
-            <span>
-              Bot: {knowledge.behavior.length.toLocaleString("it-IT")} /{" "}
-              {BEHAVIOR_LIMIT.toLocaleString("it-IT")}
-            </span>
-          </div>
-        </div>
+              </div>
 
-        <div className="right-column">
-          <VoicePanel
-            callScenario={callScenario}
-            elevenLabsConfig={elevenLabsConfig}
-            onCallScenarioChange={onCallScenarioChange}
-            onSetError={onSetError}
-            retrievalQuery={retrievalQuery}
-            selectedVectorSource={selectedVectorSource}
-          />
-          <AppointmentsPanel appointments={appointments} />
-          <DebugPanel messages={messages} />
-        </div>
-      </section>
+            </div>
+          ) : mainTab === "centralino" ? (
+            <div className="main-grid">
+              <div className="workspace-panel knowledge-panel">
+                <div className="panel-heading">
+                  <div>
+                    <p className="eyebrow">Centralino</p>
+                    <h2>Comportamento del bot</h2>
+                  </div>
+                </div>
+                <textarea
+                  className="behavior-editor"
+                  disabled={isLoading}
+                  id="behavior"
+                  value={knowledge.behavior}
+                  onChange={(event) =>
+                    onKnowledgeChange({ ...knowledge, behavior: event.target.value })
+                  }
+                />
+                <div className="meter-row">
+                  <span>
+                    Bot: {knowledge.behavior.length.toLocaleString("it-IT")} /{" "}
+                    {BEHAVIOR_LIMIT.toLocaleString("it-IT")}
+                  </span>
+                </div>
+              </div>
+
+              <div className="right-column">
+                <VoicePanel
+                  callScenario={callScenario}
+                  elevenLabsConfig={elevenLabsConfig}
+                  onCallScenarioChange={onCallScenarioChange}
+                  onSetError={onSetError}
+                  onVoiceContextChange={onVoiceContextChange}
+                  retrievalQuery={retrievalQuery}
+                  selectedVectorSource={selectedVectorSource}
+                />
+                <AppointmentsPanel appointments={appointments} />
+                <DebugPanel messages={messages} />
+              </div>
+            </div>
+          ) : (
+            <PresentationPage
+              callScenario={callScenario}
+              elevenLabsConfig={elevenLabsConfig}
+              onSetError={onSetError}
+              onVectorSourceChange={onVectorSourceChange}
+              onVoiceContextChange={onVoiceContextChange}
+              onClearTranscript={onClearPresentationTranscript}
+              retrievalQuery={retrievalQuery}
+              selectedVectorSource={selectedVectorSource}
+              transcript={presentationTranscript}
+              vectorSources={vectorSources}
+            />
+          )}
+        </section>
       )}
     </main>
+  );
+}
+
+function PresentationPage({
+  callScenario,
+  elevenLabsConfig,
+  onClearTranscript,
+  onSetError,
+  onVectorSourceChange,
+  onVoiceContextChange,
+  retrievalQuery,
+  selectedVectorSource,
+  transcript,
+  vectorSources,
+}: {
+  callScenario: CallScenario;
+  elevenLabsConfig: ElevenLabsConfig;
+  onClearTranscript: () => void;
+  onSetError: (value: string | null) => void;
+  onVectorSourceChange: (source: string | null) => void;
+  onVoiceContextChange: (value: VoiceContext | null) => void;
+  retrievalQuery: RetrievalQuery | null;
+  selectedVectorSource: string | null;
+  transcript: string[];
+  vectorSources: VectorStoreSource[];
+}) {
+  const preferredAgent =
+    elevenLabsConfig.agents.find((agent) =>
+      agent.name.toLowerCase().includes("present"),
+    ) || elevenLabsConfig.agents.find((agent) => agent.is_active) || elevenLabsConfig.agents[0];
+  const [presentationAgentId, setPresentationAgentId] = useState<string | null>(
+    preferredAgent?.agent_id ?? null,
+  );
+
+  useEffect(() => {
+    if (
+      presentationAgentId &&
+      elevenLabsConfig.agents.some((agent) => agent.agent_id === presentationAgentId)
+    ) {
+      return;
+    }
+
+    setPresentationAgentId(preferredAgent?.agent_id ?? null);
+  }, [elevenLabsConfig.agents, preferredAgent?.agent_id, presentationAgentId]);
+
+  const selectedAgent = elevenLabsConfig.agents.find(
+    (agent) => agent.agent_id === presentationAgentId,
+  );
+  const selectedSource = selectedVectorSource
+    ? vectorSources.find((source) => source.source === selectedVectorSource)
+    : undefined;
+  const startPrompt = buildPresentationStartPrompt(selectedVectorSource);
+
+  return (
+    <div className="presentation-grid">
+      <section className="workspace-panel presentation-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Presentazione</p>
+            <h2>Setup prodotto</h2>
+          </div>
+          <Database size={22} />
+        </div>
+
+        <label className="field-label" htmlFor="presentation-agent">
+          Agente presentazione
+        </label>
+        <select
+          className="config-select"
+          id="presentation-agent"
+          value={presentationAgentId ?? ""}
+          onChange={(event) => setPresentationAgentId(event.target.value || null)}
+        >
+          {elevenLabsConfig.agents.length === 0 ? (
+            <option value="">Nessun agente configurato</option>
+          ) : (
+            elevenLabsConfig.agents.map((agent) => (
+              <option key={agent.id} value={agent.agent_id}>
+                {agent.name}
+              </option>
+            ))
+          )}
+        </select>
+
+        <label className="field-label">Fonte PDF da presentare</label>
+        <div className="vector-sources presentation-sources">
+          <label className="vector-source-option all-sources">
+            <input
+              checked={selectedVectorSource === null}
+              name="presentation-source"
+              type="radio"
+              onChange={() => onVectorSourceChange(null)}
+            />
+            <span>
+              <strong>Tutte le fonti</strong>
+              <small>L'agente prepara una presentazione usando tutti i PDF indicizzati.</small>
+            </span>
+          </label>
+          {vectorSources.map((source) => (
+            <label className="vector-source-option" key={source.source}>
+              <input
+                checked={selectedVectorSource === source.source}
+                name="presentation-source"
+                type="radio"
+                onChange={() => onVectorSourceChange(source.source)}
+              />
+              <article className="vector-source-card">
+                <div>
+                  <strong>{source.source}</strong>
+                  <span>
+                    {source.chunks.toLocaleString("it-IT")} chunk -{" "}
+                    {source.chars.toLocaleString("it-IT")} caratteri
+                  </span>
+                </div>
+                <p>{source.preview}</p>
+              </article>
+            </label>
+          ))}
+        </div>
+
+        <div className="presentation-summary">
+          <strong>Pronto per presentare</strong>
+          <span>Agente: {selectedAgent?.name || "non configurato"}</span>
+          <span>Fonte: {selectedSource?.source || "tutte le fonti"}</span>
+        </div>
+      </section>
+
+      <div className="right-column">
+        <VoicePanel
+          agentId={presentationAgentId}
+          agentName={selectedAgent?.name}
+          callScenario={callScenario}
+          contextMode="presentazione"
+          elevenLabsConfig={elevenLabsConfig}
+          onCallScenarioChange={() => undefined}
+          onBeforeStart={onClearTranscript}
+          onSetError={onSetError}
+          onVoiceContextChange={onVoiceContextChange}
+          retrievalQuery={retrievalQuery}
+          selectedVectorSource={selectedVectorSource}
+          showScenario={false}
+          startButtonLabel="Avvia presentazione"
+          startPrompt={startPrompt}
+          title="Presentazione vocale"
+        />
+        <PresentationTranscript messages={transcript} onClear={onClearTranscript} />
+      </div>
+    </div>
+  );
+}
+
+function PresentationTranscript({
+  messages,
+  onClear,
+}: {
+  messages: string[];
+  onClear: () => void;
+}) {
+  return (
+    <section className="workspace-panel presentation-transcript-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Output agente</p>
+          <h2>Trascrizione presentazione</h2>
+        </div>
+        <button className="small-button" disabled={messages.length === 0} type="button" onClick={onClear}>
+          Pulisci
+        </button>
+      </div>
+      <div className="presentation-transcript">
+        {messages.length === 0 ? (
+          <p className="muted">Il testo parlato dall'agente apparira qui.</p>
+        ) : (
+          messages.map((message, index) => (
+            <p key={`${index}-${message}`}>{message}</p>
+          ))
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -930,19 +1225,37 @@ function AgentConfigCard({
 }
 
 function VoicePanel({
+  agentId,
+  agentName,
   callScenario,
+  contextMode = "centralino",
   elevenLabsConfig,
+  onBeforeStart,
   onCallScenarioChange,
   onSetError,
+  onVoiceContextChange,
   retrievalQuery,
   selectedVectorSource,
+  showScenario = true,
+  startButtonLabel = "Avvia voce",
+  startPrompt,
+  title = "Sessione agente",
 }: {
+  agentId?: string | null;
+  agentName?: string | null;
   callScenario: CallScenario;
+  contextMode?: "centralino" | "presentazione";
   elevenLabsConfig: ElevenLabsConfig;
+  onBeforeStart?: () => void;
   onCallScenarioChange: (value: CallScenario) => void;
   onSetError: (value: string | null) => void;
+  onVoiceContextChange: (value: VoiceContext | null) => void;
   retrievalQuery: RetrievalQuery | null;
   selectedVectorSource: string | null;
+  showScenario?: boolean;
+  startButtonLabel?: string;
+  startPrompt?: string;
+  title?: string;
 }) {
   const {
     startSession,
@@ -958,20 +1271,27 @@ function VoicePanel({
   const [textMessage, setTextMessage] = useState("");
   const [connectionMode, setConnectionMode] = useState<"webrtc" | "websocket">("webrtc");
   const hasSentContextRef = useRef(false);
+  const hasSentStartPromptRef = useRef(false);
   const lastContextUpdateRef = useRef("");
   const lastRetrievalIdRef = useRef<number | null>(null);
   const isConnected = status === "connected";
   const activeAgent = elevenLabsConfig.agents.find((agent) => agent.is_active);
+  const effectiveAgentId = agentId || activeAgent?.agent_id || null;
+  const effectiveAgentName = agentName || activeAgent?.name || "non configurato";
+  const isAgentConfigured = Boolean(elevenLabsConfig.api_key && effectiveAgentId);
 
   useEffect(() => {
     if (!isConnected) {
       hasSentContextRef.current = false;
+      hasSentStartPromptRef.current = false;
       lastContextUpdateRef.current = "";
       return;
     }
 
     const contextUpdate =
-      connectionMode === "webrtc"
+      contextMode === "presentazione"
+        ? buildPresentationContextUpdate(selectedVectorSource)
+        : connectionMode === "webrtc"
         ? buildRealtimeContextUpdate(callScenario, selectedVectorSource)
         : buildContextUpdate(selectedVectorSource, callScenario);
 
@@ -993,10 +1313,24 @@ function VoicePanel({
   }, [
     callScenario,
     connectionMode,
+    contextMode,
     isConnected,
     selectedVectorSource,
     sendContextualUpdate,
   ]);
+
+  useEffect(() => {
+    if (!isConnected || !startPrompt || hasSentStartPromptRef.current) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      sendUserMessage(startPrompt);
+      hasSentStartPromptRef.current = true;
+    }, 1200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isConnected, sendUserMessage, startPrompt]);
 
   useEffect(() => {
     if (!isConnected) {
@@ -1035,23 +1369,25 @@ function VoicePanel({
   }, [connectionMode, isConnected, retrievalQuery, selectedVectorSource, sendContextualUpdate]);
 
   const handleStart = async () => {
-    if (!elevenLabsConfig.configured) {
-      onSetError("Configura API key ElevenLabs e almeno un agent_id attivo.");
+    if (!isAgentConfigured) {
+      onSetError("Configura API key ElevenLabs e seleziona un agent_id.");
       return;
     }
 
     setIsStarting(true);
     try {
+      onBeforeStart?.();
+      onVoiceContextChange(contextMode);
       onSetError(null);
       if (connectionMode === "webrtc") {
-        const response = await getConversationToken();
+        const response = await getConversationToken(effectiveAgentId);
         await startSession({
           conversationToken: response.token,
           connectionType: "webrtc",
           textOnly: false,
         });
       } else {
-        const response = await getSignedUrl();
+        const response = await getSignedUrl(effectiveAgentId);
         await startSession({
           signedUrl: response.signed_url,
           connectionType: "websocket",
@@ -1059,10 +1395,16 @@ function VoicePanel({
         });
       }
     } catch (err) {
+      onVoiceContextChange(null);
       onSetError(err instanceof Error ? err.message : "Avvio sessione fallito");
     } finally {
       setIsStarting(false);
     }
+  };
+
+  const handleEnd = () => {
+    onVoiceContextChange(null);
+    endSession();
   };
 
   const handleSendText = (event: React.FormEvent<HTMLFormElement>) => {
@@ -1080,7 +1422,7 @@ function VoicePanel({
       <div className="panel-heading">
         <div>
           <p className="eyebrow">Voce realtime</p>
-          <h2>Sessione agente</h2>
+          <h2>{title}</h2>
         </div>
         <PhoneCall size={22} />
       </div>
@@ -1097,32 +1439,34 @@ function VoicePanel({
         <span>Modalita: {mode ?? "idle"}</span>
       </div>
       <div className="voice-stats compact">
-        <span>Agente: {activeAgent?.name || "non configurato"}</span>
+        <span>Agente: {effectiveAgentName}</span>
       </div>
 
       <div className="input-meter" aria-label="Livello microfono">
         <span style={{ width: `${Math.min(100, Math.round(inputVolume * 100))}%` }} />
       </div>
 
-      <div className="voice-control-group">
-        <span>Scenario</span>
-        <div className="transport-toggle scenario-toggle">
-          <button
-            className={callScenario === "inbound" ? "active" : ""}
-            type="button"
-            onClick={() => onCallScenarioChange("inbound")}
-          >
-            Entrata
-          </button>
-          <button
-            className={callScenario === "outbound" ? "active" : ""}
-            type="button"
-            onClick={() => onCallScenarioChange("outbound")}
-          >
-            Uscita
-          </button>
+      {showScenario && (
+        <div className="voice-control-group">
+          <span>Scenario</span>
+          <div className="transport-toggle scenario-toggle">
+            <button
+              className={callScenario === "inbound" ? "active" : ""}
+              type="button"
+              onClick={() => onCallScenarioChange("inbound")}
+            >
+              Entrata
+            </button>
+            <button
+              className={callScenario === "outbound" ? "active" : ""}
+              type="button"
+              onClick={() => onCallScenarioChange("outbound")}
+            >
+              Uscita
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="transport-toggle">
         <button
@@ -1144,19 +1488,19 @@ function VoicePanel({
       </div>
 
       {isConnected ? (
-        <button className="action-button danger" type="button" onClick={endSession}>
+        <button className="action-button danger" type="button" onClick={handleEnd}>
           <Square size={18} />
           Termina
         </button>
       ) : (
         <button
           className="action-button"
-          disabled={isStarting || !elevenLabsConfig.configured}
+          disabled={isStarting || !isAgentConfigured}
           type="button"
           onClick={handleStart}
         >
           {isStarting ? <Loader2 className="spin" size={18} /> : <Mic size={18} />}
-          Avvia voce
+          {startButtonLabel}
         </button>
       )}
 

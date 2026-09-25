@@ -1,4 +1,4 @@
-# JK Automa
+# CP DEMO
 
 Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 

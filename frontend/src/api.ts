@@ -168,12 +168,26 @@ export function searchVectorStore(query: string, limit = 4, source?: string | nu
   );
 }
 
-export function getSignedUrl() {
-  return request<{ signed_url: string }>("/api/elevenlabs/signed-url");
+export function getSignedUrl(agentId?: string | null) {
+  const params = new URLSearchParams();
+  if (agentId) {
+    params.set("agent_id", agentId);
+  }
+
+  return request<{ signed_url: string }>(
+    `/api/elevenlabs/signed-url${params.size ? `?${params.toString()}` : ""}`,
+  );
 }
 
-export function getConversationToken() {
-  return request<{ token: string }>("/api/elevenlabs/conversation-token");
+export function getConversationToken(agentId?: string | null) {
+  const params = new URLSearchParams();
+  if (agentId) {
+    params.set("agent_id", agentId);
+  }
+
+  return request<{ token: string }>(
+    `/api/elevenlabs/conversation-token${params.size ? `?${params.toString()}` : ""}`,
+  );
 }
 
 export function createAppointment(input: AppointmentInput) {
