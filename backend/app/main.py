@@ -95,10 +95,19 @@ class ElevenLabsConfigIn(BaseModel):
     api_key: str = Field(default="", max_length=300)
 
 
+class ElevenLabsDefaultsIn(BaseModel):
+    inbound_agent_id: str | None = Field(default=None, max_length=180)
+    outbound_agent_id: str | None = Field(default=None, max_length=180)
+    presentation_agent_id: str | None = Field(default=None, max_length=180)
+
+
 class ElevenLabsConfig(BaseModel):
     api_key: str
     agents: list[ElevenLabsAgent]
     active_agent_id: str | None
+    inbound_agent_id: str | None
+    outbound_agent_id: str | None
+    presentation_agent_id: str | None
     configured: bool
 
 
@@ -143,6 +152,17 @@ class AppointmentIn(BaseModel):
 class Appointment(AppointmentIn):
     id: int
     created_at: str
+
+
+class OutboundContactIn(BaseModel):
+    reference: str = Field(min_length=1, max_length=160)
+    phone: str = Field(min_length=3, max_length=40)
+
+
+class OutboundContact(OutboundContactIn):
+    id: int
+    created_at: str
+    updated_at: str
 
 
 TOKEN_RE = re.compile(r"[a-zA-ZÀ-ÿ0-9]{2,}")
@@ -232,6 +252,17 @@ def ensure_storage() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS outbound_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reference TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS vector_chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
@@ -265,6 +296,9 @@ def ensure_storage() -> None:
             CREATE TABLE IF NOT EXISTS elevenlabs_config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 api_key TEXT NOT NULL DEFAULT '',
+                inbound_agent_id TEXT,
+                outbound_agent_id TEXT,
+                presentation_agent_id TEXT,
                 updated_at TEXT NOT NULL
             )
             """
@@ -281,6 +315,16 @@ def ensure_storage() -> None:
             )
             """
         )
+        config_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(elevenlabs_config)").fetchall()
+        }
+        for column_name in (
+            "inbound_agent_id",
+            "outbound_agent_id",
+            "presentation_agent_id",
+        ):
+            if column_name not in config_columns:
+                conn.execute(f"ALTER TABLE elevenlabs_config ADD COLUMN {column_name} TEXT")
         behaviors_count = conn.execute("SELECT COUNT(*) FROM bot_behaviors").fetchone()[0]
         if behaviors_count == 0:
             now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -396,7 +440,7 @@ def get_elevenlabs_config_payload() -> ElevenLabsConfig:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         config = conn.execute(
-            "SELECT api_key FROM elevenlabs_config WHERE id = 1"
+            "SELECT * FROM elevenlabs_config WHERE id = 1"
         ).fetchone()
 
     api_key = config["api_key"] if config else ""
@@ -406,24 +450,11 @@ def get_elevenlabs_config_payload() -> ElevenLabsConfig:
         api_key=api_key,
         agents=agents,
         active_agent_id=active_agent.agent_id if active_agent else None,
-        configured=bool(api_key and active_agent),
+        inbound_agent_id=config["inbound_agent_id"] if config else None,
+        outbound_agent_id=config["outbound_agent_id"] if config else None,
+        presentation_agent_id=config["presentation_agent_id"] if config else None,
+        configured=bool(api_key and agents),
     )
-
-
-def get_active_elevenlabs_credentials() -> tuple[str, str]:
-    config = get_elevenlabs_config_payload()
-    if not config.active_agent_id:
-        raise HTTPException(
-            status_code=500,
-            detail="Configura almeno un agent_id ElevenLabs attivo",
-        )
-    if not config.api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="Configura ELEVENLABS_API_KEY nella pagina Configurazione",
-        )
-
-    return config.api_key, config.active_agent_id
 
 
 def get_elevenlabs_credentials(agent_id: str | None = None) -> tuple[str, str]:
@@ -456,6 +487,16 @@ def row_to_appointment(row: sqlite3.Row) -> Appointment:
         time=row["time"],
         notes=row["notes"],
         created_at=row["created_at"],
+    )
+
+
+def row_to_outbound_contact(row: sqlite3.Row) -> OutboundContact:
+    return OutboundContact(
+        id=row["id"],
+        reference=row["reference"],
+        phone=row["phone"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -687,7 +728,7 @@ def health() -> dict[str, Any]:
     config = get_elevenlabs_config_payload()
     return {
         "ok": True,
-        "agent_configured": bool(config.active_agent_id),
+        "agent_configured": bool(config.agents),
         "signed_url_available": config.configured,
     }
 
@@ -931,6 +972,51 @@ def save_elevenlabs_config(payload: ElevenLabsConfigIn) -> ElevenLabsConfig:
     return get_elevenlabs_config_payload()
 
 
+@app.put("/api/elevenlabs/config/defaults", response_model=ElevenLabsConfig)
+def save_elevenlabs_defaults(payload: ElevenLabsDefaultsIn) -> ElevenLabsConfig:
+    ensure_storage()
+    defaults = {
+        "inbound_agent_id": payload.inbound_agent_id.strip()
+        if payload.inbound_agent_id
+        else None,
+        "outbound_agent_id": payload.outbound_agent_id.strip()
+        if payload.outbound_agent_id
+        else None,
+        "presentation_agent_id": payload.presentation_agent_id.strip()
+        if payload.presentation_agent_id
+        else None,
+    }
+
+    configured_agent_ids = {agent.agent_id for agent in list_elevenlabs_agents()}
+    unknown_ids = {
+        agent_id
+        for agent_id in defaults.values()
+        if agent_id and agent_id not in configured_agent_ids
+    }
+    if unknown_ids:
+        raise HTTPException(status_code=400, detail="Uno degli agenti predefiniti non esiste")
+
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE elevenlabs_config
+            SET inbound_agent_id = ?, outbound_agent_id = ?,
+                presentation_agent_id = ?, updated_at = ?
+            WHERE id = 1
+            """,
+            (
+                defaults["inbound_agent_id"],
+                defaults["outbound_agent_id"],
+                defaults["presentation_agent_id"],
+                now,
+            ),
+        )
+        conn.commit()
+
+    return get_elevenlabs_config_payload()
+
+
 @app.post("/api/elevenlabs/agents", response_model=ElevenLabsAgent)
 def create_elevenlabs_agent(payload: ElevenLabsAgentIn) -> ElevenLabsAgent:
     ensure_storage()
@@ -984,6 +1070,17 @@ def update_elevenlabs_agent(
             """,
             (payload.name.strip(), payload.agent_id.strip(), now, agent_row_id),
         )
+        old_agent_id = row["agent_id"]
+        new_agent_id = payload.agent_id.strip()
+        for column_name in (
+            "inbound_agent_id",
+            "outbound_agent_id",
+            "presentation_agent_id",
+        ):
+            conn.execute(
+                f"UPDATE elevenlabs_config SET {column_name} = ? WHERE {column_name} = ?",
+                (new_agent_id, old_agent_id),
+            )
         conn.commit()
         updated = conn.execute(
             "SELECT * FROM elevenlabs_agents WHERE id = ?",
@@ -1037,7 +1134,17 @@ def delete_elevenlabs_agent(agent_row_id: int) -> ElevenLabsConfig:
             raise HTTPException(status_code=404, detail="Agent not found")
 
         was_active = bool(row["is_active"])
+        deleted_agent_id = row["agent_id"]
         conn.execute("DELETE FROM elevenlabs_agents WHERE id = ?", (agent_row_id,))
+        for column_name in (
+            "inbound_agent_id",
+            "outbound_agent_id",
+            "presentation_agent_id",
+        ):
+            conn.execute(
+                f"UPDATE elevenlabs_config SET {column_name} = NULL WHERE {column_name} = ?",
+                (deleted_agent_id,),
+            )
         if was_active:
             replacement = conn.execute(
                 "SELECT id FROM elevenlabs_agents ORDER BY updated_at DESC, id DESC LIMIT 1"
@@ -1156,3 +1263,90 @@ def list_appointments() -> list[Appointment]:
             "SELECT * FROM appointments ORDER BY date ASC, time ASC, id DESC"
         ).fetchall()
     return [row_to_appointment(row) for row in rows]
+
+
+@app.delete("/api/appointments")
+def delete_all_appointments() -> dict[str, int]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM appointments")
+        conn.commit()
+    return {"deleted": cursor.rowcount}
+
+
+@app.get("/api/outbound-contacts", response_model=list[OutboundContact])
+def list_outbound_contacts() -> list[OutboundContact]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM outbound_contacts ORDER BY reference COLLATE NOCASE, id"
+        ).fetchall()
+    return [row_to_outbound_contact(row) for row in rows]
+
+
+@app.post("/api/outbound-contacts", response_model=OutboundContact)
+def create_outbound_contact(payload: OutboundContactIn) -> OutboundContact:
+    ensure_storage()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            """
+            INSERT INTO outbound_contacts (reference, phone, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (payload.reference.strip(), payload.phone.strip(), now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM outbound_contacts WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    return row_to_outbound_contact(row)
+
+
+@app.put("/api/outbound-contacts/{contact_id}", response_model=OutboundContact)
+def update_outbound_contact(
+    contact_id: int,
+    payload: OutboundContactIn,
+) -> OutboundContact:
+    ensure_storage()
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT id FROM outbound_contacts WHERE id = ?",
+            (contact_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Contatto non trovato")
+
+        conn.execute(
+            """
+            UPDATE outbound_contacts
+            SET reference = ?, phone = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (payload.reference.strip(), payload.phone.strip(), now, contact_id),
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM outbound_contacts WHERE id = ?",
+            (contact_id,),
+        ).fetchone()
+    return row_to_outbound_contact(updated)
+
+
+@app.delete("/api/outbound-contacts/{contact_id}")
+def delete_outbound_contact(contact_id: int) -> dict[str, int]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            "DELETE FROM outbound_contacts WHERE id = ?",
+            (contact_id,),
+        )
+        conn.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Contatto non trovato")
+    return {"deleted": cursor.rowcount}

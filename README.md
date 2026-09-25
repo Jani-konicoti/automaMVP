@@ -4,8 +4,8 @@ Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 
 ## Cosa fa
 
-- Carichi knowledge testuale, senza PDF e senza vector store.
-- La knowledge e divisa in comportamento del bot e documentazione prodotto.
+- Carichi e indicizzi uno o piu PDF nel vector store locale.
+- Selezioni separatamente agente e fonte per Centralino e Presentazione.
 - Avvii una conversazione vocale realtime con un agente ElevenLabs.
 - L'agente risponde usando la knowledge inserita nel prompt di sessione.
 - Quando l'utente chiede un appuntamento, l'agente chiama il client tool `scheduleAppointment`.
@@ -32,7 +32,8 @@ Le credenziali ElevenLabs si configurano dall'app nella pagina `Configurazione`:
 
 - `ElevenLabs API key`
 - uno o piu `agent_id`
-- agente attivo da usare per la conversazione
+
+L'agente da usare viene scelto direttamente nel flusso `Centralino` o `Presentazione`.
 
 Avvio:
 

@@ -19,6 +19,19 @@ export type AppointmentInput = {
   notes?: string | null;
 };
 
+export type OutboundContact = {
+  id: number;
+  reference: string;
+  phone: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OutboundContactInput = {
+  reference: string;
+  phone: string;
+};
+
 export type Knowledge = {
   behavior: string;
   documentation: string;
@@ -37,7 +50,16 @@ export type ElevenLabsConfig = {
   api_key: string;
   agents: ElevenLabsAgent[];
   active_agent_id?: string | null;
+  inbound_agent_id?: string | null;
+  outbound_agent_id?: string | null;
+  presentation_agent_id?: string | null;
   configured: boolean;
+};
+
+export type ElevenLabsDefaults = {
+  inbound_agent_id: string | null;
+  outbound_agent_id: string | null;
+  presentation_agent_id: string | null;
 };
 
 export type ElevenLabsAgentInput = {
@@ -103,6 +125,13 @@ export function saveElevenLabsConfig(api_key: string) {
   });
 }
 
+export function saveElevenLabsDefaults(defaults: ElevenLabsDefaults) {
+  return request<ElevenLabsConfig>("/api/elevenlabs/config/defaults", {
+    method: "PUT",
+    body: JSON.stringify(defaults),
+  });
+}
+
 export function createElevenLabsAgent(input: ElevenLabsAgentInput) {
   return request<ElevenLabsAgent>("/api/elevenlabs/agents", {
     method: "POST",
@@ -114,12 +143,6 @@ export function updateElevenLabsAgent(id: number, input: ElevenLabsAgentInput) {
   return request<ElevenLabsAgent>(`/api/elevenlabs/agents/${id}`, {
     method: "PUT",
     body: JSON.stringify(input),
-  });
-}
-
-export function activateElevenLabsAgent(id: number) {
-  return request<ElevenLabsAgent>(`/api/elevenlabs/agents/${id}/activate`, {
-    method: "POST",
   });
 }
 
@@ -199,4 +222,34 @@ export function createAppointment(input: AppointmentInput) {
 
 export function listAppointments() {
   return request<Appointment[]>("/api/appointments");
+}
+
+export function deleteAllAppointments() {
+  return request<{ deleted: number }>("/api/appointments", {
+    method: "DELETE",
+  });
+}
+
+export function listOutboundContacts() {
+  return request<OutboundContact[]>("/api/outbound-contacts");
+}
+
+export function createOutboundContact(input: OutboundContactInput) {
+  return request<OutboundContact>("/api/outbound-contacts", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateOutboundContact(id: number, input: OutboundContactInput) {
+  return request<OutboundContact>(`/api/outbound-contacts/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteOutboundContact(id: number) {
+  return request<{ deleted: number }>(`/api/outbound-contacts/${id}`, {
+    method: "DELETE",
+  });
 }

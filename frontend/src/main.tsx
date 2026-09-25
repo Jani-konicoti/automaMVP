@@ -8,7 +8,6 @@ import {
 } from "@elevenlabs/react";
 import {
   CalendarClock,
-  Check,
   Database,
   Loader2,
   Mic,
@@ -20,6 +19,7 @@ import {
   Settings,
   Square,
   Trash2,
+  Users,
 } from "lucide-react";
 import {
   Appointment,
@@ -27,43 +27,45 @@ import {
   ElevenLabsAgent,
   ElevenLabsAgentInput,
   ElevenLabsConfig,
-  Knowledge,
+  ElevenLabsDefaults,
+  OutboundContact,
+  OutboundContactInput,
   VectorSearchResult,
   VectorStoreSource,
   VectorStoreStats,
-  activateElevenLabsAgent,
   createAppointment,
   createElevenLabsAgent,
+  createOutboundContact,
+  deleteAllAppointments,
   deleteElevenLabsAgent,
+  deleteOutboundContact,
   getConversationToken,
   getElevenLabsConfig,
-  getKnowledge,
   getSignedUrl,
   getVectorStoreSources,
   getVectorStoreStats,
   listAppointments,
+  listOutboundContacts,
   saveElevenLabsConfig,
+  saveElevenLabsDefaults,
   searchVectorStore,
   updateElevenLabsAgent,
+  updateOutboundContact,
   uploadVectorStorePdf,
 } from "./api";
 import "./styles.css";
-
-const BEHAVIOR_LIMIT = 8_000;
-const LOCAL_BEHAVIOR_KEY = "centralino.localBehavior";
 
 type RetrievalQuery = {
   id: number;
   text: string;
 };
 
-type CallScenario = "inbound" | "outbound";
 type AppView = "demo" | "config";
-type MainTab = "fonti" | "centralino" | "presentazione";
-type VoiceContext = "centralino" | "presentazione";
+type MainTab = "centralino-entrata" | "centralino-uscita" | "presentazione";
+type VoiceContext = MainTab;
 
-function callScenarioLabel(callScenario: CallScenario) {
-  return callScenario === "inbound" ? "chiamata in entrata" : "chiamata in uscita";
+function preferredAgentId(agents: ElevenLabsAgent[], pattern: RegExp) {
+  return agents.find((agent) => pattern.test(agent.name))?.agent_id ?? agents[0]?.agent_id ?? null;
 }
 
 function readableEvent(value: unknown) {
@@ -122,20 +124,15 @@ function getAgentMessage(value: unknown) {
   return null;
 }
 
-function buildContextUpdate(
-  selectedVectorSource: string | null,
-  callScenario: CallScenario,
-) {
+function buildContextUpdate(selectedVectorSource: string | null) {
   const sourceInstruction = selectedVectorSource
     ? `Fonte PDF attiva per il vector store: ${selectedVectorSource}. Quando cerchi nella documentazione PDF usa solo questa fonte.`
     : "Fonte PDF attiva per il vector store: tutte le fonti caricate.";
-  const scenarioInstruction = `Scenario corrente: ${callScenarioLabel(callScenario)}.`;
 
   return `
 Contesto operativo per questa conversazione.
 Rispondi in italiano, in modo naturale, breve e professionale.
-${scenarioInstruction}
-Segui prima le istruzioni di comportamento, poi usa la documentazione per rispondere a domande su servizi, orari, regole, prezzi o procedure.
+Usa la documentazione per rispondere a domande su servizi, orari, regole, prezzi o procedure.
 Se la documentazione non contiene la risposta, dillo con chiarezza e proponi di lasciare un appuntamento o un recapito.
 Per domande sulla documentazione, sui PDF caricati o su argomenti specifici come detassazione, reddito presunto, rinnovi contrattuali, maggiorazioni o mensilita, chiama prima il tool searchKnowledge con una query breve e specifica.
 Non dire che non hai informazioni prima di aver cercato con searchKnowledge.
@@ -143,12 +140,8 @@ ${sourceInstruction}
 `.trim();
 }
 
-function buildRealtimeContextUpdate(
-  callScenario: CallScenario,
-  selectedVectorSource: string | null,
-) {
+function buildRealtimeContextUpdate(selectedVectorSource: string | null) {
   return `
-Scenario corrente: ${callScenarioLabel(callScenario)}.
 Fonte PDF attiva: ${selectedVectorSource || "tutte le fonti"}.
 Per domande su documenti o PDF usa il tool searchKnowledge prima di rispondere.
 `.trim();
@@ -194,29 +187,29 @@ ${passages}
 
 function App() {
   const [appView, setAppView] = useState<AppView>("demo");
-  const [knowledge, setKnowledge] = useState<Knowledge>({
-    behavior:
-      typeof window === "undefined" ? "" : window.localStorage.getItem(LOCAL_BEHAVIOR_KEY) ?? "",
-    documentation: "",
-  });
   const [elevenLabsConfig, setElevenLabsConfig] = useState<ElevenLabsConfig>({
     api_key: "",
     agents: [],
     active_agent_id: null,
+    inbound_agent_id: null,
+    outbound_agent_id: null,
+    presentation_agent_id: null,
     configured: false,
   });
   const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [outboundContacts, setOutboundContacts] = useState<OutboundContact[]>([]);
   const [messages, setMessages] = useState<string[]>([]);
   const [presentationTranscript, setPresentationTranscript] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [pdfMode, setPdfMode] = useState<"append" | "replace">("append");
-  const [callScenario, setCallScenario] = useState<CallScenario>("inbound");
   const [vectorStats, setVectorStats] = useState<VectorStoreStats>({
     chunks: 0,
     sources: 0,
   });
   const [vectorSources, setVectorSources] = useState<VectorStoreSource[]>([]);
-  const [selectedVectorSource, setSelectedVectorSource] = useState<string | null>(null);
+  const [inboundVectorSource, setInboundVectorSource] = useState<string | null>(null);
+  const [outboundVectorSource, setOutboundVectorSource] = useState<string | null>(null);
+  const [presentationVectorSource, setPresentationVectorSource] = useState<string | null>(null);
   const [retrievalQuery, setRetrievalQuery] = useState<RetrievalQuery | null>(null);
   const [isIndexingPdf, setIsIndexingPdf] = useState(false);
   const [vectorStatus, setVectorStatus] = useState<string | null>(null);
@@ -236,23 +229,58 @@ function App() {
     setAppointments(rows);
   }, []);
 
+  const handleDeleteAllAppointments = useCallback(async () => {
+    setError(null);
+    await deleteAllAppointments();
+    setAppointments([]);
+  }, []);
+
+  const refreshOutboundContacts = useCallback(async () => {
+    const contacts = await listOutboundContacts();
+    setOutboundContacts(contacts);
+  }, []);
+
+  const handleCreateOutboundContact = useCallback(
+    async (input: OutboundContactInput) => {
+      setError(null);
+      await createOutboundContact(input);
+      await refreshOutboundContacts();
+    },
+    [refreshOutboundContacts],
+  );
+
+  const handleUpdateOutboundContact = useCallback(
+    async (id: number, input: OutboundContactInput) => {
+      setError(null);
+      await updateOutboundContact(id, input);
+      await refreshOutboundContacts();
+    },
+    [refreshOutboundContacts],
+  );
+
+  const handleDeleteOutboundContact = useCallback(
+    async (id: number) => {
+      setError(null);
+      await deleteOutboundContact(id);
+      await refreshOutboundContacts();
+    },
+    [refreshOutboundContacts],
+  );
+
   useEffect(() => {
     Promise.all([
-      getKnowledge(),
       getElevenLabsConfig(),
       listAppointments(),
       getVectorStoreStats(),
       getVectorStoreSources(),
+      listOutboundContacts(),
     ])
-      .then(([knowledgeResponse, configResponse, appointmentRows, stats, sources]) => {
-        setKnowledge((current) => ({
-          behavior: current.behavior || knowledgeResponse.behavior,
-          documentation: knowledgeResponse.documentation,
-        }));
+      .then(([configResponse, appointmentRows, stats, sources, contacts]) => {
         setElevenLabsConfig(configResponse);
         setAppointments(appointmentRows);
         setVectorStats(stats);
         setVectorSources(sources);
+        setOutboundContacts(contacts);
       })
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : "Errore di inizializzazione");
@@ -269,6 +297,12 @@ function App() {
   const handleSaveElevenLabsApiKey = useCallback(async (apiKey: string) => {
     setError(null);
     const config = await saveElevenLabsConfig(apiKey);
+    setElevenLabsConfig(config);
+  }, []);
+
+  const handleSaveElevenLabsDefaults = useCallback(async (defaults: ElevenLabsDefaults) => {
+    setError(null);
+    const config = await saveElevenLabsDefaults(defaults);
     setElevenLabsConfig(config);
   }, []);
 
@@ -290,15 +324,6 @@ function App() {
     [refreshElevenLabsConfig],
   );
 
-  const handleActivateElevenLabsAgent = useCallback(
-    async (id: number) => {
-      setError(null);
-      await activateElevenLabsAgent(id);
-      await refreshElevenLabsConfig();
-    },
-    [refreshElevenLabsConfig],
-  );
-
   const handleDeleteElevenLabsAgent = useCallback(async (id: number) => {
     setError(null);
     const config = await deleteElevenLabsAgent(id);
@@ -307,12 +332,24 @@ function App() {
 
   useEffect(() => {
     if (
-      selectedVectorSource &&
-      !vectorSources.some((source) => source.source === selectedVectorSource)
+      inboundVectorSource &&
+      !vectorSources.some((source) => source.source === inboundVectorSource)
     ) {
-      setSelectedVectorSource(null);
+      setInboundVectorSource(null);
     }
-  }, [selectedVectorSource, vectorSources]);
+    if (
+      outboundVectorSource &&
+      !vectorSources.some((source) => source.source === outboundVectorSource)
+    ) {
+      setOutboundVectorSource(null);
+    }
+    if (
+      presentationVectorSource &&
+      !vectorSources.some((source) => source.source === presentationVectorSource)
+    ) {
+      setPresentationVectorSource(null);
+    }
+  }, [inboundVectorSource, outboundVectorSource, presentationVectorSource, vectorSources]);
 
   const handleVectorPdfUpload = useCallback(
     async (files: File[]) => {
@@ -333,7 +370,9 @@ function App() {
         const sources = await getVectorStoreSources();
         setVectorStats({ chunks: lastResponse.chunks, sources: lastResponse.sources });
         setVectorSources(sources);
-        setSelectedVectorSource(lastResponse.source);
+        setInboundVectorSource(lastResponse.source);
+        setOutboundVectorSource(lastResponse.source);
+        setPresentationVectorSource(lastResponse.source);
         setVectorStatus(
           files.length === 1
             ? `${lastResponse.source}: ${lastResponse.pages} pagine, ${lastResponse.extracted_chars.toLocaleString(
@@ -367,11 +406,17 @@ function App() {
       }
 
       const limit = Math.min(Math.max(input.limit ?? 4, 1), 6);
-      const response = await searchVectorStore(query, limit, selectedVectorSource);
+      const selectedSource =
+        activeVoiceContextRef.current === "presentazione"
+          ? presentationVectorSource
+          : activeVoiceContextRef.current === "centralino-uscita"
+            ? outboundVectorSource
+            : inboundVectorSource;
+      const response = await searchVectorStore(query, limit, selectedSource);
       setMessages((current) =>
         [
           `tool searchKnowledge: "${query}"${
-            selectedVectorSource ? ` [${selectedVectorSource}]` : ""
+            selectedSource ? ` [${selectedSource}]` : ""
           } -> ${response.results.length} risultati`,
           ...current,
         ].slice(0, 12),
@@ -390,7 +435,7 @@ function App() {
         )
         .join("\n\n---\n\n");
     },
-    [selectedVectorSource],
+    [inboundVectorSource, outboundVectorSource, presentationVectorSource],
   );
 
   const providerConfig = useMemo(
@@ -447,28 +492,28 @@ function App() {
       <Shell
         appView={appView}
         appointments={appointments}
+        outboundContacts={outboundContacts}
         error={error}
         isLoading={isLoading}
         elevenLabsConfig={elevenLabsConfig}
-        knowledge={knowledge}
         messages={messages}
         presentationTranscript={presentationTranscript}
-        callScenario={callScenario}
         onAppViewChange={setAppView}
-        onKnowledgeChange={(value) => {
-          window.localStorage.setItem(LOCAL_BEHAVIOR_KEY, value.behavior);
-          setKnowledge(value);
-        }}
-        onCallScenarioChange={setCallScenario}
         onClearPresentationTranscript={handleClearPresentationTranscript}
-        onActivateElevenLabsAgent={handleActivateElevenLabsAgent}
         onCreateElevenLabsAgent={handleCreateElevenLabsAgent}
+        onCreateOutboundContact={handleCreateOutboundContact}
+        onDeleteAllAppointments={handleDeleteAllAppointments}
         onDeleteElevenLabsAgent={handleDeleteElevenLabsAgent}
+        onDeleteOutboundContact={handleDeleteOutboundContact}
         onSaveElevenLabsApiKey={handleSaveElevenLabsApiKey}
+        onSaveElevenLabsDefaults={handleSaveElevenLabsDefaults}
         onUpdateElevenLabsAgent={handleUpdateElevenLabsAgent}
+        onUpdateOutboundContact={handleUpdateOutboundContact}
         onPdfModeChange={setPdfMode}
         onVectorPdfUpload={handleVectorPdfUpload}
-        onVectorSourceChange={setSelectedVectorSource}
+        onInboundVectorSourceChange={setInboundVectorSource}
+        onOutboundVectorSourceChange={setOutboundVectorSource}
+        onPresentationVectorSourceChange={setPresentationVectorSource}
         onSetError={setError}
         onVoiceContextChange={handleVoiceContextChange}
         pdfMode={pdfMode}
@@ -476,7 +521,9 @@ function App() {
         vectorStats={vectorStats}
         vectorStatus={vectorStatus}
         vectorSources={vectorSources}
-        selectedVectorSource={selectedVectorSource}
+        inboundVectorSource={inboundVectorSource}
+        outboundVectorSource={outboundVectorSource}
+        presentationVectorSource={presentationVectorSource}
         retrievalQuery={retrievalQuery}
       />
     </ConversationProvider>
@@ -486,32 +533,37 @@ function App() {
 type ShellProps = {
   appView: AppView;
   appointments: Appointment[];
+  outboundContacts: OutboundContact[];
   elevenLabsConfig: ElevenLabsConfig;
   error: string | null;
   isLoading: boolean;
   isIndexingPdf: boolean;
-  knowledge: Knowledge;
   messages: string[];
   presentationTranscript: string[];
-  callScenario: CallScenario;
   pdfMode: "append" | "replace";
   vectorStats: VectorStoreStats;
   vectorStatus: string | null;
   vectorSources: VectorStoreSource[];
-  selectedVectorSource: string | null;
+  inboundVectorSource: string | null;
+  outboundVectorSource: string | null;
+  presentationVectorSource: string | null;
   retrievalQuery: RetrievalQuery | null;
   onAppViewChange: (value: AppView) => void;
-  onActivateElevenLabsAgent: (id: number) => Promise<void>;
-  onCallScenarioChange: (value: CallScenario) => void;
   onClearPresentationTranscript: () => void;
   onCreateElevenLabsAgent: (input: ElevenLabsAgentInput) => Promise<void>;
+  onCreateOutboundContact: (input: OutboundContactInput) => Promise<void>;
+  onDeleteAllAppointments: () => Promise<void>;
   onDeleteElevenLabsAgent: (id: number) => Promise<void>;
-  onKnowledgeChange: (value: Knowledge) => void;
+  onDeleteOutboundContact: (id: number) => Promise<void>;
   onPdfModeChange: (value: "append" | "replace") => void;
   onSaveElevenLabsApiKey: (apiKey: string) => Promise<void>;
+  onSaveElevenLabsDefaults: (defaults: ElevenLabsDefaults) => Promise<void>;
   onUpdateElevenLabsAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
+  onUpdateOutboundContact: (id: number, input: OutboundContactInput) => Promise<void>;
   onVectorPdfUpload: (files: File[]) => Promise<void>;
-  onVectorSourceChange: (source: string | null) => void;
+  onInboundVectorSourceChange: (source: string | null) => void;
+  onOutboundVectorSourceChange: (source: string | null) => void;
+  onPresentationVectorSourceChange: (source: string | null) => void;
   onVoiceContextChange: (value: VoiceContext | null) => void;
   onSetError: (value: string | null) => void;
 };
@@ -519,37 +571,76 @@ type ShellProps = {
 function Shell({
   appView,
   appointments,
+  outboundContacts,
   elevenLabsConfig,
   error,
   isLoading,
   isIndexingPdf,
-  knowledge,
   messages,
   presentationTranscript,
-  callScenario,
   pdfMode,
   vectorStats,
   vectorStatus,
   vectorSources,
-  selectedVectorSource,
+  inboundVectorSource,
+  outboundVectorSource,
+  presentationVectorSource,
   retrievalQuery,
   onAppViewChange,
-  onActivateElevenLabsAgent,
-  onCallScenarioChange,
   onClearPresentationTranscript,
   onCreateElevenLabsAgent,
+  onCreateOutboundContact,
+  onDeleteAllAppointments,
   onDeleteElevenLabsAgent,
-  onKnowledgeChange,
+  onDeleteOutboundContact,
   onPdfModeChange,
   onSaveElevenLabsApiKey,
+  onSaveElevenLabsDefaults,
   onUpdateElevenLabsAgent,
+  onUpdateOutboundContact,
   onVectorPdfUpload,
-  onVectorSourceChange,
+  onInboundVectorSourceChange,
+  onOutboundVectorSourceChange,
+  onPresentationVectorSourceChange,
   onVoiceContextChange,
   onSetError,
 }: ShellProps) {
-  const vectorFileInputRef = useRef<HTMLInputElement | null>(null);
-  const [mainTab, setMainTab] = useState<MainTab>("fonti");
+  const [mainTab, setMainTab] = useState<MainTab>("centralino-entrata");
+  const [inboundAgentId, setInboundAgentId] = useState<string | null>(null);
+  const [outboundAgentId, setOutboundAgentId] = useState<string | null>(null);
+  const [presentationAgentId, setPresentationAgentId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const hasAgent = (agentId: string | null) =>
+      Boolean(agentId && elevenLabsConfig.agents.some((agent) => agent.agent_id === agentId));
+
+    setInboundAgentId((current) =>
+      hasAgent(elevenLabsConfig.inbound_agent_id ?? null)
+        ? elevenLabsConfig.inbound_agent_id ?? null
+        : hasAgent(current)
+          ? current
+          : preferredAgentId(elevenLabsConfig.agents, /entrata|inbound|ricev/i),
+    );
+    setOutboundAgentId((current) =>
+      hasAgent(elevenLabsConfig.outbound_agent_id ?? null)
+        ? elevenLabsConfig.outbound_agent_id ?? null
+        : hasAgent(current)
+          ? current
+          : preferredAgentId(elevenLabsConfig.agents, /uscita|outbound|chiam/i),
+    );
+    setPresentationAgentId((current) =>
+      hasAgent(elevenLabsConfig.presentation_agent_id ?? null)
+        ? elevenLabsConfig.presentation_agent_id ?? null
+        : hasAgent(current)
+          ? current
+          : preferredAgentId(elevenLabsConfig.agents, /present/i),
+    );
+  }, [
+    elevenLabsConfig.agents,
+    elevenLabsConfig.inbound_agent_id,
+    elevenLabsConfig.outbound_agent_id,
+    elevenLabsConfig.presentation_agent_id,
+  ]);
 
   return (
     <main className="app-shell">
@@ -593,10 +684,10 @@ function Shell({
         <ConfigPage
           config={elevenLabsConfig}
           isLoading={isLoading}
-          onActivateAgent={onActivateElevenLabsAgent}
           onCreateAgent={onCreateElevenLabsAgent}
           onDeleteAgent={onDeleteElevenLabsAgent}
           onSaveApiKey={onSaveElevenLabsApiKey}
+          onSaveDefaults={onSaveElevenLabsDefaults}
           onSetError={onSetError}
           onUpdateAgent={onUpdateElevenLabsAgent}
         />
@@ -604,18 +695,18 @@ function Shell({
         <section className="main-workspace">
           <div className="section-tabs">
             <button
-              className={mainTab === "fonti" ? "active" : ""}
+              className={mainTab === "centralino-entrata" ? "active" : ""}
               type="button"
-              onClick={() => setMainTab("fonti")}
+              onClick={() => setMainTab("centralino-entrata")}
             >
-              Fonti
+              Centralino Entrata
             </button>
             <button
-              className={mainTab === "centralino" ? "active" : ""}
+              className={mainTab === "centralino-uscita" ? "active" : ""}
               type="button"
-              onClick={() => setMainTab("centralino")}
+              onClick={() => setMainTab("centralino-uscita")}
             >
-              Centralino
+              Centralino Uscita
             </button>
             <button
               className={mainTab === "presentazione" ? "active" : ""}
@@ -626,163 +717,67 @@ function Shell({
             </button>
           </div>
 
-          {mainTab === "fonti" ? (
-            <div className="sources-layout">
-              <div className="workspace-panel sources-panel">
-          <div className="panel-heading">
-            <div>
-              <p className="eyebrow">Knowledge PDF</p>
-              <h2>Fonti dell'agente</h2>
-            </div>
-          </div>
-          <label className="field-label">
-            Vector PDF
-          </label>
-          <div className="pdf-toolbar">
-            <div className="transport-toggle pdf-mode-toggle">
-              <button
-                className={pdfMode === "append" ? "active" : ""}
-                disabled={isIndexingPdf}
-                type="button"
-                onClick={() => onPdfModeChange("append")}
-              >
-                Aggiungi
-              </button>
-              <button
-                className={pdfMode === "replace" ? "active" : ""}
-                disabled={isIndexingPdf}
-                type="button"
-                onClick={() => onPdfModeChange("replace")}
-              >
-                Sostituisci
-              </button>
-            </div>
-            <input
-              accept="application/pdf"
-              className="hidden-file-input"
-              disabled={isIndexingPdf}
-              multiple
-              ref={vectorFileInputRef}
-              type="file"
-              onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                event.target.value = "";
-                if (files.length > 0) {
-                  void onVectorPdfUpload(files);
-                }
-              }}
+          {mainTab === "centralino-entrata" ? (
+            <CentralinoPage
+              agentId={inboundAgentId}
+              appointments={appointments}
+              elevenLabsConfig={elevenLabsConfig}
+              flow="centralino-entrata"
+              isIndexingPdf={isIndexingPdf}
+              messages={messages}
+              onAgentChange={setInboundAgentId}
+              onPdfModeChange={onPdfModeChange}
+              onDeleteAllAppointments={onDeleteAllAppointments}
+              onSetError={onSetError}
+              onVectorPdfUpload={onVectorPdfUpload}
+              onVectorSourceChange={onInboundVectorSourceChange}
+              onVoiceContextChange={onVoiceContextChange}
+              pdfMode={pdfMode}
+              retrievalQuery={retrievalQuery}
+              selectedVectorSource={inboundVectorSource}
+              title="Centralino Entrata"
+              vectorSources={vectorSources}
+              vectorStats={vectorStats}
+              vectorStatus={vectorStatus}
             />
-            <button
-              className="pdf-upload-button secondary"
-              disabled={isIndexingPdf}
-              type="button"
-              onClick={() => vectorFileInputRef.current?.click()}
-            >
-              {isIndexingPdf ? (
-                <Loader2 className="spin" size={16} />
-              ) : (
-                <Database size={16} />
-              )}
-              Vector PDF
-            </button>
-          </div>
-          <div className="pdf-status vector-status">
-            <Database size={15} />
-            <span>
-              Vector store: {vectorStats.chunks.toLocaleString("it-IT")} chunk,{" "}
-              {vectorStats.sources.toLocaleString("it-IT")} fonti
-              {vectorStatus ? ` - ${vectorStatus}` : ""}
-            </span>
-          </div>
-          {vectorSources.length > 0 && (
-            <div className="vector-sources">
-              <label className="vector-source-option all-sources">
-                <input
-                  checked={selectedVectorSource === null}
-                  name="vector-source"
-                  type="radio"
-                  onChange={() => onVectorSourceChange(null)}
-                />
-                <span>
-                  <strong>Tutte le fonti</strong>
-                  <small>Il tool cerca in tutti i PDF indicizzati.</small>
-                </span>
-              </label>
-              {vectorSources.map((source) => (
-                <label className="vector-source-option" key={source.source}>
-                  <input
-                    checked={selectedVectorSource === source.source}
-                    name="vector-source"
-                    type="radio"
-                    onChange={() => onVectorSourceChange(source.source)}
-                  />
-                  <article className="vector-source-card">
-                  <div>
-                    <strong>{source.source}</strong>
-                    <span>
-                      {source.chunks.toLocaleString("it-IT")} chunk -{" "}
-                      {source.chars.toLocaleString("it-IT")} caratteri
-                    </span>
-                  </div>
-                  <p>{source.preview}</p>
-                  </article>
-                </label>
-              ))}
-            </div>
-          )}
-              </div>
-
-            </div>
-          ) : mainTab === "centralino" ? (
-            <div className="main-grid">
-              <div className="workspace-panel knowledge-panel">
-                <div className="panel-heading">
-                  <div>
-                    <p className="eyebrow">Centralino</p>
-                    <h2>Comportamento del bot</h2>
-                  </div>
-                </div>
-                <textarea
-                  className="behavior-editor"
-                  disabled={isLoading}
-                  id="behavior"
-                  value={knowledge.behavior}
-                  onChange={(event) =>
-                    onKnowledgeChange({ ...knowledge, behavior: event.target.value })
-                  }
-                />
-                <div className="meter-row">
-                  <span>
-                    Bot: {knowledge.behavior.length.toLocaleString("it-IT")} /{" "}
-                    {BEHAVIOR_LIMIT.toLocaleString("it-IT")}
-                  </span>
-                </div>
-              </div>
-
-              <div className="right-column">
-                <VoicePanel
-                  callScenario={callScenario}
-                  elevenLabsConfig={elevenLabsConfig}
-                  onCallScenarioChange={onCallScenarioChange}
-                  onSetError={onSetError}
-                  onVoiceContextChange={onVoiceContextChange}
-                  retrievalQuery={retrievalQuery}
-                  selectedVectorSource={selectedVectorSource}
-                />
-                <AppointmentsPanel appointments={appointments} />
-                <DebugPanel messages={messages} />
-              </div>
-            </div>
+          ) : mainTab === "centralino-uscita" ? (
+            <CentralinoPage
+              agentId={outboundAgentId}
+              appointments={appointments}
+              contacts={outboundContacts}
+              elevenLabsConfig={elevenLabsConfig}
+              flow="centralino-uscita"
+              isIndexingPdf={isIndexingPdf}
+              messages={messages}
+              onAgentChange={setOutboundAgentId}
+              onCreateContact={onCreateOutboundContact}
+              onDeleteAllAppointments={onDeleteAllAppointments}
+              onDeleteContact={onDeleteOutboundContact}
+              onPdfModeChange={onPdfModeChange}
+              onSetError={onSetError}
+              onVectorPdfUpload={onVectorPdfUpload}
+              onVectorSourceChange={onOutboundVectorSourceChange}
+              onVoiceContextChange={onVoiceContextChange}
+              onUpdateContact={onUpdateOutboundContact}
+              pdfMode={pdfMode}
+              retrievalQuery={retrievalQuery}
+              selectedVectorSource={outboundVectorSource}
+              title="Centralino Uscita"
+              vectorSources={vectorSources}
+              vectorStats={vectorStats}
+              vectorStatus={vectorStatus}
+            />
           ) : (
             <PresentationPage
-              callScenario={callScenario}
+              agentId={presentationAgentId}
               elevenLabsConfig={elevenLabsConfig}
+              onAgentChange={setPresentationAgentId}
               onSetError={onSetError}
-              onVectorSourceChange={onVectorSourceChange}
+              onVectorSourceChange={onPresentationVectorSourceChange}
               onVoiceContextChange={onVoiceContextChange}
               onClearTranscript={onClearPresentationTranscript}
               retrievalQuery={retrievalQuery}
-              selectedVectorSource={selectedVectorSource}
+              selectedVectorSource={presentationVectorSource}
               transcript={presentationTranscript}
               vectorSources={vectorSources}
             />
@@ -793,9 +788,476 @@ function Shell({
   );
 }
 
-function PresentationPage({
-  callScenario,
+function CentralinoPage({
+  agentId,
+  appointments,
+  contacts = [],
   elevenLabsConfig,
+  flow,
+  isIndexingPdf,
+  messages,
+  onAgentChange,
+  onCreateContact,
+  onPdfModeChange,
+  onDeleteAllAppointments,
+  onDeleteContact,
+  onSetError,
+  onVectorPdfUpload,
+  onVectorSourceChange,
+  onVoiceContextChange,
+  onUpdateContact,
+  pdfMode,
+  retrievalQuery,
+  selectedVectorSource,
+  title,
+  vectorSources,
+  vectorStats,
+  vectorStatus,
+}: {
+  agentId: string | null;
+  appointments: Appointment[];
+  contacts?: OutboundContact[];
+  elevenLabsConfig: ElevenLabsConfig;
+  flow: "centralino-entrata" | "centralino-uscita";
+  isIndexingPdf: boolean;
+  messages: string[];
+  onAgentChange: (agentId: string | null) => void;
+  onCreateContact?: (input: OutboundContactInput) => Promise<void>;
+  onPdfModeChange: (value: "append" | "replace") => void;
+  onDeleteAllAppointments: () => Promise<void>;
+  onDeleteContact?: (id: number) => Promise<void>;
+  onSetError: (value: string | null) => void;
+  onVectorPdfUpload: (files: File[]) => Promise<void>;
+  onVectorSourceChange: (source: string | null) => void;
+  onVoiceContextChange: (value: VoiceContext | null) => void;
+  onUpdateContact?: (id: number, input: OutboundContactInput) => Promise<void>;
+  pdfMode: "append" | "replace";
+  retrievalQuery: RetrievalQuery | null;
+  selectedVectorSource: string | null;
+  title: string;
+  vectorSources: VectorStoreSource[];
+  vectorStats: VectorStoreStats;
+  vectorStatus: string | null;
+}) {
+  const selectedAgent = elevenLabsConfig.agents.find(
+    (agent) => agent.agent_id === agentId,
+  );
+
+  return (
+    <div className="main-grid">
+      <section className="workspace-panel setup-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Centralino</p>
+            <h2>{title}</h2>
+          </div>
+          <PhoneCall size={22} />
+        </div>
+
+        <AgentSelector
+          agents={elevenLabsConfig.agents}
+          id={`${flow}-agent`}
+          label="Agente centralino"
+          selectedAgentId={agentId}
+          onChange={onAgentChange}
+        />
+
+        <VectorPdfManager
+          isIndexingPdf={isIndexingPdf}
+          onPdfModeChange={onPdfModeChange}
+          onVectorPdfUpload={onVectorPdfUpload}
+          pdfMode={pdfMode}
+          vectorStats={vectorStats}
+          vectorStatus={vectorStatus}
+        />
+        <VectorSourceSelector
+          allSourcesDescription="Il centralino cerca in tutti i PDF indicizzati."
+          name={`${flow}-source`}
+          onChange={onVectorSourceChange}
+          selectedSource={selectedVectorSource}
+          sources={vectorSources}
+        />
+      </section>
+
+      <div className="right-column">
+        <VoicePanel
+          agentId={agentId}
+          agentName={selectedAgent?.name}
+          contextMode={flow}
+          elevenLabsConfig={elevenLabsConfig}
+          onSetError={onSetError}
+          onVoiceContextChange={onVoiceContextChange}
+          retrievalQuery={retrievalQuery}
+          selectedVectorSource={selectedVectorSource}
+          title={title}
+        />
+        {flow === "centralino-uscita" &&
+          onCreateContact &&
+          onDeleteContact &&
+          onUpdateContact && (
+            <OutboundContactsPanel
+              contacts={contacts}
+              onCreate={onCreateContact}
+              onDelete={onDeleteContact}
+              onSetError={onSetError}
+              onUpdate={onUpdateContact}
+            />
+          )}
+        <AppointmentsPanel
+          appointments={appointments}
+          onDeleteAll={onDeleteAllAppointments}
+          onSetError={onSetError}
+        />
+        <DebugPanel messages={messages} />
+      </div>
+    </div>
+  );
+}
+
+function OutboundContactsPanel({
+  contacts,
+  onCreate,
+  onDelete,
+  onSetError,
+  onUpdate,
+}: {
+  contacts: OutboundContact[];
+  onCreate: (input: OutboundContactInput) => Promise<void>;
+  onDelete: (id: number) => Promise<void>;
+  onSetError: (value: string | null) => void;
+  onUpdate: (id: number, input: OutboundContactInput) => Promise<void>;
+}) {
+  const [reference, setReference] = useState("");
+  const [phone, setPhone] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+
+  const handleCreate = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const input = { reference: reference.trim(), phone: phone.trim() };
+    if (!input.reference || !input.phone) {
+      return;
+    }
+
+    setIsCreating(true);
+    try {
+      await onCreate(input);
+      setReference("");
+      setPhone("");
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Creazione contatto fallita");
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  return (
+    <section className="workspace-panel contacts-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Chiamate in uscita</p>
+          <h2>Anagrafica</h2>
+        </div>
+        <Users size={22} />
+      </div>
+
+      <form className="contact-create-form" onSubmit={handleCreate}>
+        <input
+          disabled={isCreating}
+          placeholder="Riferimento"
+          value={reference}
+          onChange={(event) => setReference(event.target.value)}
+        />
+        <input
+          disabled={isCreating}
+          placeholder="Numero di telefono"
+          type="tel"
+          value={phone}
+          onChange={(event) => setPhone(event.target.value)}
+        />
+        <button
+          className="icon-button primary"
+          disabled={isCreating || !reference.trim() || !phone.trim()}
+          title="Aggiungi contatto"
+          type="submit"
+        >
+          {isCreating ? <Loader2 className="spin" size={17} /> : <Plus size={17} />}
+        </button>
+      </form>
+
+      <div className="contacts-list">
+        {contacts.length === 0 ? (
+          <p className="muted">Nessun contatto inserito.</p>
+        ) : (
+          contacts.map((contact) => (
+            <OutboundContactRow
+              contact={contact}
+              key={contact.id}
+              onDelete={onDelete}
+              onSetError={onSetError}
+              onUpdate={onUpdate}
+            />
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function OutboundContactRow({
+  contact,
+  onDelete,
+  onSetError,
+  onUpdate,
+}: {
+  contact: OutboundContact;
+  onDelete: (id: number) => Promise<void>;
+  onSetError: (value: string | null) => void;
+  onUpdate: (id: number, input: OutboundContactInput) => Promise<void>;
+}) {
+  const [reference, setReference] = useState(contact.reference);
+  const [phone, setPhone] = useState(contact.phone);
+  const [isBusy, setIsBusy] = useState(false);
+
+  useEffect(() => {
+    setReference(contact.reference);
+    setPhone(contact.phone);
+  }, [contact.phone, contact.reference]);
+
+  const handleUpdate = async () => {
+    setIsBusy(true);
+    try {
+      await onUpdate(contact.id, { reference: reference.trim(), phone: phone.trim() });
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Aggiornamento contatto fallito");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm(`Eliminare il contatto ${contact.reference}?`)) {
+      return;
+    }
+
+    setIsBusy(true);
+    try {
+      await onDelete(contact.id);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Eliminazione contatto fallita");
+      setIsBusy(false);
+    }
+  };
+
+  const isUnchanged = reference === contact.reference && phone === contact.phone;
+
+  return (
+    <article className="contact-row">
+      <input
+        aria-label="Riferimento"
+        disabled={isBusy}
+        value={reference}
+        onChange={(event) => setReference(event.target.value)}
+      />
+      <input
+        aria-label="Numero di telefono"
+        disabled={isBusy}
+        type="tel"
+        value={phone}
+        onChange={(event) => setPhone(event.target.value)}
+      />
+      <div className="contact-actions">
+        <button
+          className="icon-button contact-icon-button"
+          disabled={isBusy || isUnchanged || !reference.trim() || !phone.trim()}
+          title="Salva modifiche"
+          type="button"
+          onClick={handleUpdate}
+        >
+          {isBusy ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+        </button>
+        <button
+          className="icon-button contact-icon-button danger"
+          disabled={isBusy}
+          title="Elimina contatto"
+          type="button"
+          onClick={handleDelete}
+        >
+          <Trash2 size={16} />
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function AgentSelector({
+  agents,
+  id,
+  label,
+  onChange,
+  selectedAgentId,
+}: {
+  agents: ElevenLabsAgent[];
+  id: string;
+  label: string;
+  onChange: (agentId: string | null) => void;
+  selectedAgentId: string | null;
+}) {
+  return (
+    <>
+      <label className="field-label" htmlFor={id}>
+        {label}
+      </label>
+      <select
+        className="config-select"
+        id={id}
+        value={selectedAgentId ?? ""}
+        onChange={(event) => onChange(event.target.value || null)}
+      >
+        {agents.length === 0 ? (
+          <option value="">Nessun agente configurato</option>
+        ) : (
+          agents.map((agent) => (
+            <option key={agent.id} value={agent.agent_id}>
+              {agent.name}
+            </option>
+          ))
+        )}
+      </select>
+    </>
+  );
+}
+
+function VectorPdfManager({
+  isIndexingPdf,
+  onPdfModeChange,
+  onVectorPdfUpload,
+  pdfMode,
+  vectorStats,
+  vectorStatus,
+}: {
+  isIndexingPdf: boolean;
+  onPdfModeChange: (value: "append" | "replace") => void;
+  onVectorPdfUpload: (files: File[]) => Promise<void>;
+  pdfMode: "append" | "replace";
+  vectorStats: VectorStoreStats;
+  vectorStatus: string | null;
+}) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  return (
+    <>
+      <label className="field-label">Vector PDF</label>
+      <div className="pdf-toolbar">
+        <div className="transport-toggle pdf-mode-toggle">
+          <button
+            className={pdfMode === "append" ? "active" : ""}
+            disabled={isIndexingPdf}
+            type="button"
+            onClick={() => onPdfModeChange("append")}
+          >
+            Aggiungi
+          </button>
+          <button
+            className={pdfMode === "replace" ? "active" : ""}
+            disabled={isIndexingPdf}
+            type="button"
+            onClick={() => onPdfModeChange("replace")}
+          >
+            Sostituisci
+          </button>
+        </div>
+        <input
+          accept="application/pdf"
+          className="hidden-file-input"
+          disabled={isIndexingPdf}
+          multiple
+          ref={fileInputRef}
+          type="file"
+          onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = "";
+            if (files.length > 0) {
+              void onVectorPdfUpload(files);
+            }
+          }}
+        />
+        <button
+          className="pdf-upload-button secondary"
+          disabled={isIndexingPdf}
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          {isIndexingPdf ? <Loader2 className="spin" size={16} /> : <Database size={16} />}
+          Vector PDF
+        </button>
+      </div>
+      <div className="pdf-status vector-status">
+        <Database size={15} />
+        <span>
+          Vector store: {vectorStats.chunks.toLocaleString("it-IT")} chunk,{" "}
+          {vectorStats.sources.toLocaleString("it-IT")} fonti
+          {vectorStatus ? ` - ${vectorStatus}` : ""}
+        </span>
+      </div>
+    </>
+  );
+}
+
+function VectorSourceSelector({
+  allSourcesDescription,
+  name,
+  onChange,
+  selectedSource,
+  sources,
+}: {
+  allSourcesDescription: string;
+  name: string;
+  onChange: (source: string | null) => void;
+  selectedSource: string | null;
+  sources: VectorStoreSource[];
+}) {
+  return (
+    <div className="vector-sources">
+      <label className="vector-source-option all-sources">
+        <input
+          checked={selectedSource === null}
+          name={name}
+          type="radio"
+          onChange={() => onChange(null)}
+        />
+        <span>
+          <strong>Tutte le fonti</strong>
+          <small>{allSourcesDescription}</small>
+        </span>
+      </label>
+      {sources.map((source) => (
+        <label className="vector-source-option" key={source.source}>
+          <input
+            checked={selectedSource === source.source}
+            name={name}
+            type="radio"
+            onChange={() => onChange(source.source)}
+          />
+          <article className="vector-source-card">
+            <div>
+              <strong>{source.source}</strong>
+              <span>
+                {source.chunks.toLocaleString("it-IT")} chunk -{" "}
+                {source.chars.toLocaleString("it-IT")} caratteri
+              </span>
+            </div>
+            <p>{source.preview}</p>
+          </article>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function PresentationPage({
+  agentId,
+  elevenLabsConfig,
+  onAgentChange,
   onClearTranscript,
   onSetError,
   onVectorSourceChange,
@@ -805,8 +1267,9 @@ function PresentationPage({
   transcript,
   vectorSources,
 }: {
-  callScenario: CallScenario;
+  agentId: string | null;
   elevenLabsConfig: ElevenLabsConfig;
+  onAgentChange: (agentId: string | null) => void;
   onClearTranscript: () => void;
   onSetError: (value: string | null) => void;
   onVectorSourceChange: (source: string | null) => void;
@@ -816,27 +1279,8 @@ function PresentationPage({
   transcript: string[];
   vectorSources: VectorStoreSource[];
 }) {
-  const preferredAgent =
-    elevenLabsConfig.agents.find((agent) =>
-      agent.name.toLowerCase().includes("present"),
-    ) || elevenLabsConfig.agents.find((agent) => agent.is_active) || elevenLabsConfig.agents[0];
-  const [presentationAgentId, setPresentationAgentId] = useState<string | null>(
-    preferredAgent?.agent_id ?? null,
-  );
-
-  useEffect(() => {
-    if (
-      presentationAgentId &&
-      elevenLabsConfig.agents.some((agent) => agent.agent_id === presentationAgentId)
-    ) {
-      return;
-    }
-
-    setPresentationAgentId(preferredAgent?.agent_id ?? null);
-  }, [elevenLabsConfig.agents, preferredAgent?.agent_id, presentationAgentId]);
-
   const selectedAgent = elevenLabsConfig.agents.find(
-    (agent) => agent.agent_id === presentationAgentId,
+    (agent) => agent.agent_id === agentId,
   );
   const selectedSource = selectedVectorSource
     ? vectorSources.find((source) => source.source === selectedVectorSource)
@@ -854,61 +1298,22 @@ function PresentationPage({
           <Database size={22} />
         </div>
 
-        <label className="field-label" htmlFor="presentation-agent">
-          Agente presentazione
-        </label>
-        <select
-          className="config-select"
+        <AgentSelector
+          agents={elevenLabsConfig.agents}
           id="presentation-agent"
-          value={presentationAgentId ?? ""}
-          onChange={(event) => setPresentationAgentId(event.target.value || null)}
-        >
-          {elevenLabsConfig.agents.length === 0 ? (
-            <option value="">Nessun agente configurato</option>
-          ) : (
-            elevenLabsConfig.agents.map((agent) => (
-              <option key={agent.id} value={agent.agent_id}>
-                {agent.name}
-              </option>
-            ))
-          )}
-        </select>
+          label="Agente presentazione"
+          onChange={onAgentChange}
+          selectedAgentId={agentId}
+        />
 
         <label className="field-label">Fonte PDF da presentare</label>
-        <div className="vector-sources presentation-sources">
-          <label className="vector-source-option all-sources">
-            <input
-              checked={selectedVectorSource === null}
-              name="presentation-source"
-              type="radio"
-              onChange={() => onVectorSourceChange(null)}
-            />
-            <span>
-              <strong>Tutte le fonti</strong>
-              <small>L'agente prepara una presentazione usando tutti i PDF indicizzati.</small>
-            </span>
-          </label>
-          {vectorSources.map((source) => (
-            <label className="vector-source-option" key={source.source}>
-              <input
-                checked={selectedVectorSource === source.source}
-                name="presentation-source"
-                type="radio"
-                onChange={() => onVectorSourceChange(source.source)}
-              />
-              <article className="vector-source-card">
-                <div>
-                  <strong>{source.source}</strong>
-                  <span>
-                    {source.chunks.toLocaleString("it-IT")} chunk -{" "}
-                    {source.chars.toLocaleString("it-IT")} caratteri
-                  </span>
-                </div>
-                <p>{source.preview}</p>
-              </article>
-            </label>
-          ))}
-        </div>
+        <VectorSourceSelector
+          allSourcesDescription="L'agente prepara una presentazione usando tutti i PDF indicizzati."
+          name="presentation-source"
+          onChange={onVectorSourceChange}
+          selectedSource={selectedVectorSource}
+          sources={vectorSources}
+        />
 
         <div className="presentation-summary">
           <strong>Pronto per presentare</strong>
@@ -919,18 +1324,15 @@ function PresentationPage({
 
       <div className="right-column">
         <VoicePanel
-          agentId={presentationAgentId}
+          agentId={agentId}
           agentName={selectedAgent?.name}
-          callScenario={callScenario}
           contextMode="presentazione"
           elevenLabsConfig={elevenLabsConfig}
-          onCallScenarioChange={() => undefined}
           onBeforeStart={onClearTranscript}
           onSetError={onSetError}
           onVoiceContextChange={onVoiceContextChange}
           retrievalQuery={retrievalQuery}
           selectedVectorSource={selectedVectorSource}
-          showScenario={false}
           startButtonLabel="Avvia presentazione"
           startPrompt={startPrompt}
           title="Presentazione vocale"
@@ -975,19 +1377,19 @@ function PresentationTranscript({
 function ConfigPage({
   config,
   isLoading,
-  onActivateAgent,
   onCreateAgent,
   onDeleteAgent,
   onSaveApiKey,
+  onSaveDefaults,
   onSetError,
   onUpdateAgent,
 }: {
   config: ElevenLabsConfig;
   isLoading: boolean;
-  onActivateAgent: (id: number) => Promise<void>;
   onCreateAgent: (input: ElevenLabsAgentInput) => Promise<void>;
   onDeleteAgent: (id: number) => Promise<void>;
   onSaveApiKey: (apiKey: string) => Promise<void>;
+  onSaveDefaults: (defaults: ElevenLabsDefaults) => Promise<void>;
   onSetError: (value: string | null) => void;
   onUpdateAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
 }) {
@@ -995,11 +1397,29 @@ function ConfigPage({
   const [newAgentName, setNewAgentName] = useState("");
   const [newAgentId, setNewAgentId] = useState("");
   const [isSavingKey, setIsSavingKey] = useState(false);
+  const [isSavingDefaults, setIsSavingDefaults] = useState(false);
   const [isCreatingAgent, setIsCreatingAgent] = useState(false);
+  const [defaults, setDefaults] = useState<ElevenLabsDefaults>({
+    inbound_agent_id: config.inbound_agent_id ?? null,
+    outbound_agent_id: config.outbound_agent_id ?? null,
+    presentation_agent_id: config.presentation_agent_id ?? null,
+  });
 
   useEffect(() => {
     setApiKey(config.api_key);
   }, [config.api_key]);
+
+  useEffect(() => {
+    setDefaults({
+      inbound_agent_id: config.inbound_agent_id ?? null,
+      outbound_agent_id: config.outbound_agent_id ?? null,
+      presentation_agent_id: config.presentation_agent_id ?? null,
+    });
+  }, [
+    config.inbound_agent_id,
+    config.outbound_agent_id,
+    config.presentation_agent_id,
+  ]);
 
   const handleSaveApiKey = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1033,6 +1453,18 @@ function ConfigPage({
     }
   };
 
+  const handleSaveDefaults = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setIsSavingDefaults(true);
+    try {
+      await onSaveDefaults(defaults);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Salvataggio agenti predefiniti fallito");
+    } finally {
+      setIsSavingDefaults(false);
+    }
+  };
+
   return (
     <section className="config-grid">
       <div className="workspace-panel">
@@ -1061,10 +1493,14 @@ function ConfigPage({
           </button>
         </form>
 
-        <div className={`config-status ${config.configured ? "ready" : ""}`}>
-          {config.configured
-            ? `Configurazione attiva: ${config.active_agent_id}`
-            : "Inserisci API key e attiva almeno un agente."}
+        <div
+          className={`config-status ${
+            config.api_key && config.agents.length > 0 ? "ready" : ""
+          }`}
+        >
+          {config.api_key && config.agents.length > 0
+            ? `${config.agents.length} agenti disponibili per i flussi.`
+            : "Inserisci l'API key e aggiungi almeno un agente."}
         </div>
       </div>
 
@@ -1076,6 +1512,48 @@ function ConfigPage({
           </div>
           <PhoneCall size={22} />
         </div>
+
+        <form className="agent-defaults-form" onSubmit={handleSaveDefaults}>
+          <div className="agent-defaults-grid">
+            {(
+              [
+                ["inbound_agent_id", "Centralino Entrata"],
+                ["outbound_agent_id", "Centralino Uscita"],
+                ["presentation_agent_id", "Presentazione"],
+              ] as const
+            ).map(([field, label]) => (
+              <label key={field}>
+                <span>{label}</span>
+                <select
+                  className="config-select"
+                  disabled={isSavingDefaults || config.agents.length === 0}
+                  value={defaults[field] ?? ""}
+                  onChange={(event) =>
+                    setDefaults((current) => ({
+                      ...current,
+                      [field]: event.target.value || null,
+                    }))
+                  }
+                >
+                  <option value="">Nessun predefinito</option>
+                  {config.agents.map((agent) => (
+                    <option key={agent.id} value={agent.agent_id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
+          <button
+            className="small-button"
+            disabled={isSavingDefaults || config.agents.length === 0}
+            type="submit"
+          >
+            {isSavingDefaults ? <Loader2 className="spin" size={15} /> : <Save size={15} />}
+            Salva predefiniti
+          </button>
+        </form>
 
         <form className="agent-create-form" onSubmit={handleCreateAgent}>
           <input
@@ -1108,7 +1586,6 @@ function ConfigPage({
               <AgentConfigCard
                 agent={agent}
                 key={agent.id}
-                onActivate={onActivateAgent}
                 onDelete={onDeleteAgent}
                 onSetError={onSetError}
                 onUpdate={onUpdateAgent}
@@ -1123,13 +1600,11 @@ function ConfigPage({
 
 function AgentConfigCard({
   agent,
-  onActivate,
   onDelete,
   onSetError,
   onUpdate,
 }: {
   agent: ElevenLabsAgent;
-  onActivate: (id: number) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onSetError: (value: string | null) => void;
   onUpdate: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
@@ -1154,17 +1629,6 @@ function AgentConfigCard({
     }
   };
 
-  const handleActivate = async () => {
-    setIsBusy(true);
-    try {
-      await onActivate(agent.id);
-    } catch (err) {
-      onSetError(err instanceof Error ? err.message : "Attivazione agente fallita");
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
   const handleDelete = async () => {
     setIsBusy(true);
     try {
@@ -1176,17 +1640,7 @@ function AgentConfigCard({
   };
 
   return (
-    <article className={`agent-config-card ${agent.is_active ? "active" : ""}`}>
-      <label className="agent-active-choice">
-        <input
-          checked={agent.is_active}
-          disabled={isBusy}
-          name="active-agent"
-          type="radio"
-          onChange={handleActivate}
-        />
-        <span>{agent.is_active ? "Attivo" : "Usa questo agente"}</span>
-      </label>
+    <article className="agent-config-card">
       <div className="agent-config-fields">
         <input
           disabled={isBusy}
@@ -1209,12 +1663,6 @@ function AgentConfigCard({
           {isBusy ? <Loader2 className="spin" size={15} /> : <Save size={15} />}
           Aggiorna
         </button>
-        {!agent.is_active && (
-          <button className="small-button" disabled={isBusy} type="button" onClick={handleActivate}>
-            <Check size={15} />
-            Attiva
-          </button>
-        )}
         <button className="small-button danger" disabled={isBusy} type="button" onClick={handleDelete}>
           <Trash2 size={15} />
           Elimina
@@ -1227,32 +1675,26 @@ function AgentConfigCard({
 function VoicePanel({
   agentId,
   agentName,
-  callScenario,
-  contextMode = "centralino",
+  contextMode = "centralino-entrata",
   elevenLabsConfig,
   onBeforeStart,
-  onCallScenarioChange,
   onSetError,
   onVoiceContextChange,
   retrievalQuery,
   selectedVectorSource,
-  showScenario = true,
   startButtonLabel = "Avvia voce",
   startPrompt,
   title = "Sessione agente",
 }: {
   agentId?: string | null;
   agentName?: string | null;
-  callScenario: CallScenario;
-  contextMode?: "centralino" | "presentazione";
+  contextMode?: VoiceContext;
   elevenLabsConfig: ElevenLabsConfig;
   onBeforeStart?: () => void;
-  onCallScenarioChange: (value: CallScenario) => void;
   onSetError: (value: string | null) => void;
   onVoiceContextChange: (value: VoiceContext | null) => void;
   retrievalQuery: RetrievalQuery | null;
   selectedVectorSource: string | null;
-  showScenario?: boolean;
   startButtonLabel?: string;
   startPrompt?: string;
   title?: string;
@@ -1275,9 +1717,8 @@ function VoicePanel({
   const lastContextUpdateRef = useRef("");
   const lastRetrievalIdRef = useRef<number | null>(null);
   const isConnected = status === "connected";
-  const activeAgent = elevenLabsConfig.agents.find((agent) => agent.is_active);
-  const effectiveAgentId = agentId || activeAgent?.agent_id || null;
-  const effectiveAgentName = agentName || activeAgent?.name || "non configurato";
+  const effectiveAgentId = agentId || null;
+  const effectiveAgentName = agentName || "non configurato";
   const isAgentConfigured = Boolean(elevenLabsConfig.api_key && effectiveAgentId);
 
   useEffect(() => {
@@ -1292,8 +1733,8 @@ function VoicePanel({
       contextMode === "presentazione"
         ? buildPresentationContextUpdate(selectedVectorSource)
         : connectionMode === "webrtc"
-        ? buildRealtimeContextUpdate(callScenario, selectedVectorSource)
-        : buildContextUpdate(selectedVectorSource, callScenario);
+        ? buildRealtimeContextUpdate(selectedVectorSource)
+        : buildContextUpdate(selectedVectorSource);
 
     if (!hasSentContextRef.current || lastContextUpdateRef.current !== contextUpdate) {
       if (connectionMode === "webrtc") {
@@ -1311,7 +1752,6 @@ function VoicePanel({
       lastContextUpdateRef.current = contextUpdate;
     }
   }, [
-    callScenario,
     connectionMode,
     contextMode,
     isConnected,
@@ -1446,28 +1886,6 @@ function VoicePanel({
         <span style={{ width: `${Math.min(100, Math.round(inputVolume * 100))}%` }} />
       </div>
 
-      {showScenario && (
-        <div className="voice-control-group">
-          <span>Scenario</span>
-          <div className="transport-toggle scenario-toggle">
-            <button
-              className={callScenario === "inbound" ? "active" : ""}
-              type="button"
-              onClick={() => onCallScenarioChange("inbound")}
-            >
-              Entrata
-            </button>
-            <button
-              className={callScenario === "outbound" ? "active" : ""}
-              type="button"
-              onClick={() => onCallScenarioChange("outbound")}
-            >
-              Uscita
-            </button>
-          </div>
-        </div>
-      )}
-
       <div className="transport-toggle">
         <button
           className={connectionMode === "webrtc" ? "active" : ""}
@@ -1529,7 +1947,32 @@ function StatusPill() {
   );
 }
 
-function AppointmentsPanel({ appointments }: { appointments: Appointment[] }) {
+function AppointmentsPanel({
+  appointments,
+  onDeleteAll,
+  onSetError,
+}: {
+  appointments: Appointment[];
+  onDeleteAll: () => Promise<void>;
+  onSetError: (value: string | null) => void;
+}) {
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleDeleteAll = async () => {
+    if (!window.confirm("Cancellare tutti gli appuntamenti?")) {
+      return;
+    }
+
+    setIsDeleting(true);
+    try {
+      await onDeleteAll();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Cancellazione appuntamenti fallita");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   return (
     <section className="workspace-panel">
       <div className="panel-heading">
@@ -1537,7 +1980,18 @@ function AppointmentsPanel({ appointments }: { appointments: Appointment[] }) {
           <p className="eyebrow">SQLite</p>
           <h2>Appuntamenti</h2>
         </div>
-        <CalendarClock size={22} />
+        <div className="panel-heading-actions">
+          <button
+            className="small-button danger"
+            disabled={appointments.length === 0 || isDeleting}
+            type="button"
+            onClick={handleDeleteAll}
+          >
+            {isDeleting ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
+            Cancella tutti
+          </button>
+          <CalendarClock size={22} />
+        </div>
       </div>
 
       <div className="appointments-list">

@@ -113,15 +113,12 @@ button:disabled {
   max-width: 1280px;
 }
 
-.sources-layout {
-  display: grid;
-}
-
 .section-tabs {
   align-items: center;
   background: #edf2ea;
   border-radius: 8px;
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
   justify-self: start;
   padding: 4px;
@@ -175,10 +172,7 @@ button:disabled {
   min-height: auto;
 }
 
-.sources-panel {
-  min-height: 560px;
-}
-
+.setup-panel,
 .presentation-panel {
   min-height: 560px;
 }
@@ -193,6 +187,12 @@ button:disabled {
 
 .panel-heading h2 {
   font-size: 1.12rem;
+}
+
+.panel-heading-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
 }
 
 textarea {
@@ -228,10 +228,6 @@ input {
   outline: none;
   padding: 0 12px;
   width: 100%;
-}
-
-.behavior-editor {
-  min-height: 150px;
 }
 
 .field-label {
@@ -300,10 +296,6 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(37, 115, 91, 0.14);
 }
 
-.presentation-sources {
-  margin-top: 0;
-}
-
 .presentation-summary {
   background: #f4f6f1;
   border: 1px solid #dfe5dc;
@@ -359,6 +351,37 @@ textarea:focus {
   margin-bottom: 14px;
 }
 
+.agent-defaults-form {
+  background: #f4f6f1;
+  border: 1px solid #dfe5dc;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+}
+
+.agent-defaults-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.agent-defaults-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-defaults-grid label > span {
+  color: #526056;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.agent-defaults-form .small-button {
+  justify-self: start;
+}
+
 .compact-action {
   margin-top: 12px;
   max-width: 220px;
@@ -387,27 +410,6 @@ textarea:focus {
   display: grid;
   gap: 10px;
   padding: 12px;
-}
-
-.agent-config-card.active {
-  border-color: #1f6f5b;
-  box-shadow: 0 0 0 3px rgba(31, 111, 91, 0.12);
-}
-
-.agent-active-choice {
-  align-items: center;
-  color: #314038;
-  cursor: pointer;
-  display: flex;
-  font-size: 0.84rem;
-  font-weight: 800;
-  gap: 8px;
-}
-
-.agent-active-choice input {
-  accent-color: #1f6f5b;
-  min-height: auto;
-  width: auto;
 }
 
 .agent-config-fields {
@@ -473,19 +475,6 @@ textarea:focus {
   transition: width 120ms linear;
 }
 
-.voice-control-group {
-  display: grid;
-  gap: 6px;
-  margin: 0 0 12px;
-  text-align: left;
-}
-
-.voice-control-group > span {
-  color: #667064;
-  font-size: 0.78rem;
-  font-weight: 800;
-}
-
 .transport-toggle {
   background: #edf2ea;
   border-radius: 8px;
@@ -510,10 +499,6 @@ textarea:focus {
   background: #ffffff;
   color: #17211b;
   box-shadow: 0 1px 4px rgba(33, 45, 37, 0.12);
-}
-
-.scenario-toggle {
-  margin-bottom: 0;
 }
 
 .pdf-toolbar {
@@ -776,6 +761,56 @@ textarea:focus {
   overflow: auto;
 }
 
+.contact-create-form,
+.contact-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 40px;
+}
+
+.contact-create-form {
+  margin-bottom: 12px;
+}
+
+.contacts-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.contact-row {
+  align-items: center;
+  background: #f8faf6;
+  border: 1px solid #dfe5dc;
+  border-radius: 8px;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1fr) auto;
+  padding: 8px;
+}
+
+.contact-row input {
+  min-height: 38px;
+}
+
+.contact-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.contact-icon-button {
+  background: #edf2ea;
+  border: 1px solid #d6dfd2;
+  color: #314038;
+  height: 38px;
+  width: 38px;
+}
+
+.contact-icon-button.danger {
+  background: #fff1ed;
+  border-color: #f0c9bd;
+  color: #7a2e25;
+}
+
 .appointment-card {
   background: #f8faf6;
   border: 1px solid #dfe5dc;
@@ -872,6 +907,10 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .agent-defaults-grid {
+    grid-template-columns: 1fr;
+  }
+
   .presentation-grid {
     grid-template-columns: 1fr;
   }
@@ -884,9 +923,6 @@ textarea:focus {
     min-height: 260px;
   }
 
-  .behavior-editor {
-    min-height: 140px;
-  }
 }
 
 @media (max-width: 560px) {
@@ -905,6 +941,15 @@ textarea:focus {
   .agent-config-fields,
   .agent-create-form {
     grid-template-columns: 1fr;
+  }
+
+  .contact-create-form,
+  .contact-row {
+    grid-template-columns: 1fr;
+  }
+
+  .contact-create-form .icon-button {
+    width: 100%;
   }
 
   .topbar-actions {
