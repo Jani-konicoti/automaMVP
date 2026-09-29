@@ -7,21 +7,28 @@ import {
   useConversationStatus,
 } from "@elevenlabs/react";
 import {
+  Activity,
+  BookOpen,
   CalendarClock,
   Database,
   Loader2,
+  Menu,
   Mic,
   MicOff,
   PhoneCall,
+  PhoneIncoming,
   PhoneOutgoing,
   Plus,
+  Presentation,
   RefreshCw,
   Save,
   Send,
   Settings,
   Square,
   Trash2,
+  UserPlus,
   Users,
+  X,
 } from "lucide-react";
 import {
   Appointment,
@@ -41,6 +48,7 @@ import {
   createElevenLabsAgent,
   createOutboundContact,
   deleteAllAppointments,
+  deleteAllOutboundCalls,
   deleteElevenLabsAgent,
   deleteOutboundContact,
   getConversationToken,
@@ -72,6 +80,15 @@ type RetrievalQuery = {
 type AppView = "demo" | "config";
 type MainTab = "centralino-entrata" | "centralino-uscita" | "presentazione";
 type VoiceContext = MainTab;
+type NavigationPage = MainTab | "config";
+type OutboundSection = "operations" | "sources" | "appointments" | "events";
+
+function navigationPageFromHash(): NavigationPage {
+  const page = window.location.hash.replace(/^#/, "");
+  return page === "centralino-uscita" || page === "presentazione" || page === "config"
+    ? page
+    : "centralino-entrata";
+}
 
 function preferredAgentId(agents: ElevenLabsAgent[], pattern: RegExp) {
   return agents.find((agent) => pattern.test(agent.name))?.agent_id ?? agents[0]?.agent_id ?? null;
@@ -195,7 +212,9 @@ ${passages}
 }
 
 function App() {
-  const [appView, setAppView] = useState<AppView>("demo");
+  const [appView, setAppView] = useState<AppView>(() =>
+    navigationPageFromHash() === "config" ? "config" : "demo",
+  );
   const [elevenLabsConfig, setElevenLabsConfig] = useState<ElevenLabsConfig>({
     api_key: "",
     agents: [],
@@ -260,6 +279,12 @@ function App() {
   const refreshOutboundCalls = useCallback(async () => {
     const calls = await listOutboundCalls();
     setOutboundCalls(calls);
+  }, []);
+
+  const handleDeleteAllOutboundCalls = useCallback(async () => {
+    setError(null);
+    await deleteAllOutboundCalls();
+    setOutboundCalls([]);
   }, []);
 
   const refreshPhoneNumbers = useCallback(async () => {
@@ -620,6 +645,7 @@ function App() {
         onCreateElevenLabsAgent={handleCreateElevenLabsAgent}
         onCreateOutboundContact={handleCreateOutboundContact}
         onDeleteAllAppointments={handleDeleteAllAppointments}
+        onDeleteAllOutboundCalls={handleDeleteAllOutboundCalls}
         onDeleteElevenLabsAgent={handleDeleteElevenLabsAgent}
         onDeleteOutboundContact={handleDeleteOutboundContact}
         onSaveElevenLabsApiKey={handleSaveElevenLabsApiKey}
@@ -682,6 +708,7 @@ type ShellProps = {
   onCreateElevenLabsAgent: (input: ElevenLabsAgentInput) => Promise<void>;
   onCreateOutboundContact: (input: OutboundContactInput) => Promise<void>;
   onDeleteAllAppointments: () => Promise<void>;
+  onDeleteAllOutboundCalls: () => Promise<void>;
   onDeleteElevenLabsAgent: (id: number) => Promise<void>;
   onDeleteOutboundContact: (id: number) => Promise<void>;
   onPdfModeChange: (value: "append" | "replace") => void;
@@ -734,6 +761,7 @@ function Shell({
   onCreateElevenLabsAgent,
   onCreateOutboundContact,
   onDeleteAllAppointments,
+  onDeleteAllOutboundCalls,
   onDeleteElevenLabsAgent,
   onDeleteOutboundContact,
   onPdfModeChange,
@@ -752,7 +780,11 @@ function Shell({
   onVoiceContextChange,
   onSetError,
 }: ShellProps) {
-  const [mainTab, setMainTab] = useState<MainTab>("centralino-entrata");
+  const [mainTab, setMainTab] = useState<MainTab>(() => {
+    const page = navigationPageFromHash();
+    return page === "config" ? "centralino-entrata" : page;
+  });
+  const [isNavigationOpen, setIsNavigationOpen] = useState(false);
   const [inboundAgentId, setInboundAgentId] = useState<string | null>(null);
   const [outboundAgentId, setOutboundAgentId] = useState<string | null>(null);
   const [presentationAgentId, setPresentationAgentId] = useState<string | null>(null);
@@ -789,154 +821,234 @@ function Shell({
     elevenLabsConfig.presentation_agent_id,
   ]);
 
+  const activePage = appView === "config" ? "config" : mainTab;
+  const pageDetails =
+    activePage === "centralino-entrata"
+      ? { eyebrow: "Centralino", title: "Chiamate in entrata", description: "Gestione agente, fonti e appuntamenti" }
+      : activePage === "centralino-uscita"
+        ? { eyebrow: "Centralino", title: "Chiamate in uscita", description: "Contatti, telefonate e trascrizioni" }
+        : activePage === "presentazione"
+          ? { eyebrow: "Presentazione", title: "Presentazione commerciale", description: "Sessioni guidate sulle fonti selezionate" }
+          : { eyebrow: "Sistema", title: "Configurazione", description: "Agenti, credenziali e integrazioni" };
+
+  const navigateTo = (page: MainTab | "config") => {
+    if (page === "config") {
+      onAppViewChange("config");
+    } else {
+      setMainTab(page);
+      onAppViewChange("demo");
+    }
+    window.history.replaceState(null, "", `#${page}`);
+    setIsNavigationOpen(false);
+  };
+
+  useEffect(() => {
+    const handleHashChange = () => {
+      const page = navigationPageFromHash();
+      if (page === "config") {
+        onAppViewChange("config");
+      } else {
+        setMainTab(page);
+        onAppViewChange("demo");
+      }
+      setIsNavigationOpen(false);
+    };
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, [onAppViewChange]);
+
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Automazione vocale</p>
-          <h1>JK Automa</h1>
-        </div>
-        <div className="topbar-actions">
-          <div className="view-tabs">
-            <button
-              className={appView === "demo" ? "active" : ""}
-              type="button"
-              onClick={() => onAppViewChange("demo")}
-            >
-              Demo
-            </button>
-            <button
-              className={appView === "config" ? "active" : ""}
-              type="button"
-              onClick={() => onAppViewChange("config")}
-            >
-              <Settings size={16} />
-              Configurazione
-            </button>
+      <aside className={`app-sidebar ${isNavigationOpen ? "open" : ""}`}>
+        <div className="sidebar-brand">
+          <span className="brand-mark">JK</span>
+          <div>
+            <strong>JK Automa</strong>
+            <span>Voice operations</span>
           </div>
-          <StatusPill />
-        </div>
-      </header>
-
-      {error && (
-        <div className="error-banner">
-          <span>{error}</span>
-          <button type="button" onClick={() => onSetError(null)}>
-            Chiudi
+          <button
+            className="sidebar-close"
+            title="Chiudi menu"
+            type="button"
+            onClick={() => setIsNavigationOpen(false)}
+          >
+            <X size={19} />
           </button>
         </div>
+
+        <nav className="sidebar-navigation" aria-label="Navigazione principale">
+          <p>Operatività</p>
+          <button
+            className={activePage === "centralino-entrata" ? "active" : ""}
+            type="button"
+            onClick={() => navigateTo("centralino-entrata")}
+          >
+            <PhoneIncoming size={18} />
+            <span>Centralino Entrata</span>
+          </button>
+          <button
+            className={activePage === "centralino-uscita" ? "active" : ""}
+            type="button"
+            onClick={() => navigateTo("centralino-uscita")}
+          >
+            <PhoneOutgoing size={18} />
+            <span>Centralino Uscita</span>
+          </button>
+          <button
+            className={activePage === "presentazione" ? "active" : ""}
+            type="button"
+            onClick={() => navigateTo("presentazione")}
+          >
+            <Presentation size={18} />
+            <span>Presentazione</span>
+          </button>
+
+          <p>Amministrazione</p>
+          <button
+            className={activePage === "config" ? "active" : ""}
+            type="button"
+            onClick={() => navigateTo("config")}
+          >
+            <Settings size={18} />
+            <span>Configurazione</span>
+          </button>
+        </nav>
+
+        <div className="sidebar-footer">
+          <span>Stato piattaforma</span>
+          <StatusPill />
+        </div>
+      </aside>
+
+      {isNavigationOpen && (
+        <button
+          aria-label="Chiudi navigazione"
+          className="navigation-backdrop"
+          type="button"
+          onClick={() => setIsNavigationOpen(false)}
+        />
       )}
 
-      {appView === "config" ? (
-        <ConfigPage
-          config={elevenLabsConfig}
-          isLoading={isLoading}
-          onCreateAgent={onCreateElevenLabsAgent}
-          onDeleteAgent={onDeleteElevenLabsAgent}
-          onSaveApiKey={onSaveElevenLabsApiKey}
-          onSaveDefaults={onSaveElevenLabsDefaults}
-          onSaveIntegration={onSaveElevenLabsIntegration}
-          onSetError={onSetError}
-          onUpdateAgent={onUpdateElevenLabsAgent}
-        />
-      ) : (
-        <section className="main-workspace">
-          <div className="section-tabs">
+      <div className="app-content">
+        <header className="page-header">
+          <button
+            className="mobile-menu-button"
+            title="Apri menu"
+            type="button"
+            onClick={() => setIsNavigationOpen(true)}
+          >
+            <Menu size={20} />
+          </button>
+          <div>
+            <p className="eyebrow">{pageDetails.eyebrow}</p>
+            <h1>{pageDetails.title}</h1>
+            <span>{pageDetails.description}</span>
+          </div>
+          <div className="page-header-status">
+            <StatusPill />
+          </div>
+        </header>
+
+        {error && (
+          <div className="error-banner">
+            <span>{error}</span>
             <button
-              className={mainTab === "centralino-entrata" ? "active" : ""}
               type="button"
-              onClick={() => setMainTab("centralino-entrata")}
+              onClick={() => onSetError(null)}
             >
-              Centralino Entrata
-            </button>
-            <button
-              className={mainTab === "centralino-uscita" ? "active" : ""}
-              type="button"
-              onClick={() => setMainTab("centralino-uscita")}
-            >
-              Centralino Uscita
-            </button>
-            <button
-              className={mainTab === "presentazione" ? "active" : ""}
-              type="button"
-              onClick={() => setMainTab("presentazione")}
-            >
-              Presentazione
+              Chiudi
             </button>
           </div>
+        )}
 
-          {mainTab === "centralino-entrata" ? (
-            <CentralinoPage
-              agentId={inboundAgentId}
-              appointments={appointments}
-              elevenLabsConfig={elevenLabsConfig}
-              flow="centralino-entrata"
-              isIndexingPdf={isIndexingPdf}
-              messages={messages}
-              onAgentChange={setInboundAgentId}
-              onPdfModeChange={onPdfModeChange}
-              onDeleteAllAppointments={onDeleteAllAppointments}
-              onSetError={onSetError}
-              onVectorPdfUpload={onVectorPdfUpload}
-              onVectorSourceChange={onInboundVectorSourceChange}
-              onVoiceContextChange={onVoiceContextChange}
-              pdfMode={pdfMode}
-              retrievalQuery={retrievalQuery}
-              selectedVectorSource={inboundVectorSource}
-              title="Centralino Entrata"
-              vectorSources={vectorSources}
-              vectorStats={vectorStats}
-              vectorStatus={vectorStatus}
-            />
-          ) : mainTab === "centralino-uscita" ? (
-            <CentralinoPage
-              agentId={outboundAgentId}
-              appointments={appointments}
-              contacts={outboundContacts}
-              outboundCalls={outboundCalls}
-              phoneNumbers={phoneNumbers}
-              elevenLabsConfig={elevenLabsConfig}
-              flow="centralino-uscita"
-              isIndexingPdf={isIndexingPdf}
-              messages={messages}
-              onAgentChange={setOutboundAgentId}
-              onCreateContact={onCreateOutboundContact}
-              onDeleteAllAppointments={onDeleteAllAppointments}
-              onDeleteContact={onDeleteOutboundContact}
-              onPdfModeChange={onPdfModeChange}
-              onSetError={onSetError}
-              onStartOutboundCall={onStartOutboundCall}
-              onRefreshOutboundCalls={onRefreshOutboundCalls}
-              onRefreshPhoneNumbers={onRefreshPhoneNumbers}
-              onVectorPdfUpload={onVectorPdfUpload}
-              onVectorSourceChange={onOutboundVectorSourceChange}
-              onVoiceContextChange={onVoiceContextChange}
-              onUpdateContact={onUpdateOutboundContact}
-              pdfMode={pdfMode}
-              retrievalQuery={retrievalQuery}
-              selectedVectorSource={outboundVectorSource}
-              title="Centralino Uscita"
-              vectorSources={vectorSources}
-              vectorStats={vectorStats}
-              vectorStatus={vectorStatus}
-            />
-          ) : (
-            <PresentationPage
-              agentId={presentationAgentId}
-              elevenLabsConfig={elevenLabsConfig}
-              onAgentChange={setPresentationAgentId}
-              onSetError={onSetError}
-              onVectorSourceChange={onPresentationVectorSourceChange}
-              onVoiceContextChange={onVoiceContextChange}
-              onClearTranscript={onClearPresentationTranscript}
-              retrievalQuery={retrievalQuery}
-              selectedVectorSource={presentationVectorSource}
-              transcript={presentationTranscript}
-              vectorSources={vectorSources}
-            />
-          )}
-        </section>
-      )}
+        {appView === "config" ? (
+          <ConfigPage
+            config={elevenLabsConfig}
+            isLoading={isLoading}
+            onCreateAgent={onCreateElevenLabsAgent}
+            onDeleteAgent={onDeleteElevenLabsAgent}
+            onSaveApiKey={onSaveElevenLabsApiKey}
+            onSaveDefaults={onSaveElevenLabsDefaults}
+            onSaveIntegration={onSaveElevenLabsIntegration}
+            onSetError={onSetError}
+            onUpdateAgent={onUpdateElevenLabsAgent}
+          />
+        ) : (
+          <section className="main-workspace">
+            {mainTab === "centralino-entrata" ? (
+              <CentralinoPage
+                agentId={inboundAgentId}
+                appointments={appointments}
+                elevenLabsConfig={elevenLabsConfig}
+                flow="centralino-entrata"
+                isIndexingPdf={isIndexingPdf}
+                messages={messages}
+                onAgentChange={setInboundAgentId}
+                onPdfModeChange={onPdfModeChange}
+                onDeleteAllAppointments={onDeleteAllAppointments}
+                onSetError={onSetError}
+                onVectorPdfUpload={onVectorPdfUpload}
+                onVectorSourceChange={onInboundVectorSourceChange}
+                onVoiceContextChange={onVoiceContextChange}
+                pdfMode={pdfMode}
+                retrievalQuery={retrievalQuery}
+                selectedVectorSource={inboundVectorSource}
+                title="Centralino Entrata"
+                vectorSources={vectorSources}
+                vectorStats={vectorStats}
+                vectorStatus={vectorStatus}
+              />
+            ) : mainTab === "centralino-uscita" ? (
+              <CentralinoPage
+                agentId={outboundAgentId}
+                appointments={appointments}
+                contacts={outboundContacts}
+                outboundCalls={outboundCalls}
+                phoneNumbers={phoneNumbers}
+                elevenLabsConfig={elevenLabsConfig}
+                flow="centralino-uscita"
+                isIndexingPdf={isIndexingPdf}
+                messages={messages}
+                onAgentChange={setOutboundAgentId}
+                onCreateContact={onCreateOutboundContact}
+                onDeleteAllAppointments={onDeleteAllAppointments}
+                onDeleteAllOutboundCalls={onDeleteAllOutboundCalls}
+                onDeleteContact={onDeleteOutboundContact}
+                onPdfModeChange={onPdfModeChange}
+                onSetError={onSetError}
+                onStartOutboundCall={onStartOutboundCall}
+                onRefreshOutboundCalls={onRefreshOutboundCalls}
+                onRefreshPhoneNumbers={onRefreshPhoneNumbers}
+                onVectorPdfUpload={onVectorPdfUpload}
+                onVectorSourceChange={onOutboundVectorSourceChange}
+                onVoiceContextChange={onVoiceContextChange}
+                onUpdateContact={onUpdateOutboundContact}
+                pdfMode={pdfMode}
+                retrievalQuery={retrievalQuery}
+                selectedVectorSource={outboundVectorSource}
+                title="Centralino Uscita"
+                vectorSources={vectorSources}
+                vectorStats={vectorStats}
+                vectorStatus={vectorStatus}
+              />
+            ) : (
+              <PresentationPage
+                agentId={presentationAgentId}
+                elevenLabsConfig={elevenLabsConfig}
+                onAgentChange={setPresentationAgentId}
+                onSetError={onSetError}
+                onVectorSourceChange={onPresentationVectorSourceChange}
+                onVoiceContextChange={onVoiceContextChange}
+                onClearTranscript={onClearPresentationTranscript}
+                retrievalQuery={retrievalQuery}
+                selectedVectorSource={presentationVectorSource}
+                transcript={presentationTranscript}
+                vectorSources={vectorSources}
+              />
+            )}
+          </section>
+        )}
+      </div>
     </main>
   );
 }
@@ -955,6 +1067,7 @@ function CentralinoPage({
   onCreateContact,
   onPdfModeChange,
   onDeleteAllAppointments,
+  onDeleteAllOutboundCalls,
   onDeleteContact,
   onSetError,
   onStartOutboundCall,
@@ -985,6 +1098,7 @@ function CentralinoPage({
   onCreateContact?: (input: OutboundContactInput) => Promise<void>;
   onPdfModeChange: (value: "append" | "replace") => void;
   onDeleteAllAppointments: () => Promise<void>;
+  onDeleteAllOutboundCalls?: () => Promise<void>;
   onDeleteContact?: (id: number) => Promise<void>;
   onSetError: (value: string | null) => void;
   onStartOutboundCall?: (
@@ -1007,9 +1121,147 @@ function CentralinoPage({
   vectorStats: VectorStoreStats;
   vectorStatus: string | null;
 }) {
+  const [outboundSection, setOutboundSection] = useState<OutboundSection>("operations");
   const selectedAgent = elevenLabsConfig.agents.find(
     (agent) => agent.agent_id === agentId,
   );
+
+  if (
+    flow === "centralino-uscita" &&
+    onCreateContact &&
+    onDeleteContact &&
+    onUpdateContact &&
+    onStartOutboundCall &&
+    onDeleteAllOutboundCalls &&
+    onRefreshOutboundCalls &&
+    onRefreshPhoneNumbers
+  ) {
+    return (
+      <div className="outbound-workspace">
+        <nav className="workspace-subnav" aria-label="Sezioni chiamate in uscita">
+          <button
+            className={outboundSection === "operations" ? "active" : ""}
+            type="button"
+            onClick={() => setOutboundSection("operations")}
+          >
+            <PhoneOutgoing size={17} />
+            Operatività
+          </button>
+          <button
+            className={outboundSection === "sources" ? "active" : ""}
+            type="button"
+            onClick={() => setOutboundSection("sources")}
+          >
+            <BookOpen size={17} />
+            Fonti
+          </button>
+          <button
+            className={outboundSection === "appointments" ? "active" : ""}
+            type="button"
+            onClick={() => setOutboundSection("appointments")}
+          >
+            <CalendarClock size={17} />
+            Appuntamenti
+            {appointments.length > 0 && <span>{appointments.length}</span>}
+          </button>
+          <button
+            className={outboundSection === "events" ? "active" : ""}
+            type="button"
+            onClick={() => setOutboundSection("events")}
+          >
+            <Activity size={17} />
+            Eventi
+          </button>
+        </nav>
+
+        {outboundSection === "operations" && (
+          <>
+            <section className="outbound-context-bar">
+              <div className="outbound-agent-control">
+                <AgentSelector
+                  agents={elevenLabsConfig.agents}
+                  id={`${flow}-agent`}
+                  label="Agente per le chiamate"
+                  selectedAgentId={agentId}
+                  onChange={onAgentChange}
+                />
+              </div>
+              <div className="outbound-context-summary">
+                <span>Fonte attiva</span>
+                <strong>{selectedVectorSource ?? "Tutte le fonti"}</strong>
+                <small>{vectorSources.length} PDF indicizzati</small>
+              </div>
+            </section>
+            <div className="outbound-operations-grid">
+              <VoicePanel
+                agentId={agentId}
+                agentName={selectedAgent?.name}
+                contextMode={flow}
+                elevenLabsConfig={elevenLabsConfig}
+                onSetError={onSetError}
+                onVoiceContextChange={onVoiceContextChange}
+                retrievalQuery={retrievalQuery}
+                selectedVectorSource={selectedVectorSource}
+                title={title}
+              />
+              <OutboundContactsPanel
+                agentId={agentId}
+                contacts={contacts}
+                calls={outboundCalls}
+                onCreate={onCreateContact}
+                onDeleteAllCalls={onDeleteAllOutboundCalls}
+                onDelete={onDeleteContact}
+                onRefreshCalls={onRefreshOutboundCalls}
+                onRefreshPhoneNumbers={onRefreshPhoneNumbers}
+                onSetError={onSetError}
+                onStartCall={onStartOutboundCall}
+                onUpdate={onUpdateContact}
+                phoneNumbers={phoneNumbers}
+                selectedSource={selectedVectorSource}
+              />
+            </div>
+          </>
+        )}
+
+        {outboundSection === "sources" && (
+          <section className="workspace-panel outbound-sources-panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Knowledge PDF</p>
+                <h2>Fonti del centralino in uscita</h2>
+              </div>
+              <BookOpen size={22} />
+            </div>
+            <VectorPdfManager
+              isIndexingPdf={isIndexingPdf}
+              onPdfModeChange={onPdfModeChange}
+              onVectorPdfUpload={onVectorPdfUpload}
+              pdfMode={pdfMode}
+              vectorStats={vectorStats}
+              vectorStatus={vectorStatus}
+            />
+            <VectorSourceSelector
+              allSourcesDescription="Il centralino cerca in tutti i PDF indicizzati."
+              name={`${flow}-source`}
+              onChange={onVectorSourceChange}
+              selectedSource={selectedVectorSource}
+              sources={vectorSources}
+            />
+          </section>
+        )}
+
+        {outboundSection === "appointments" && (
+          <AppointmentsPanel
+            appointments={appointments}
+            onDeleteAll={onDeleteAllAppointments}
+            onSetError={onSetError}
+          />
+        )}
+
+        {outboundSection === "events" && <DebugPanel messages={messages} />}
+      </div>
+    );
+  }
 
   return (
     <div className="main-grid">
@@ -1059,28 +1311,6 @@ function CentralinoPage({
           selectedVectorSource={selectedVectorSource}
           title={title}
         />
-        {flow === "centralino-uscita" &&
-          onCreateContact &&
-          onDeleteContact &&
-          onUpdateContact &&
-          onStartOutboundCall &&
-          onRefreshOutboundCalls &&
-          onRefreshPhoneNumbers && (
-            <OutboundContactsPanel
-              agentId={agentId}
-              contacts={contacts}
-              calls={outboundCalls}
-              onCreate={onCreateContact}
-              onDelete={onDeleteContact}
-              onRefreshCalls={onRefreshOutboundCalls}
-              onRefreshPhoneNumbers={onRefreshPhoneNumbers}
-              onSetError={onSetError}
-              onStartCall={onStartOutboundCall}
-              onUpdate={onUpdateContact}
-              phoneNumbers={phoneNumbers}
-              selectedSource={selectedVectorSource}
-            />
-          )}
         <AppointmentsPanel
           appointments={appointments}
           onDeleteAll={onDeleteAllAppointments}
@@ -1092,11 +1322,117 @@ function CentralinoPage({
   );
 }
 
+function Modal({
+  children,
+  eyebrow,
+  icon,
+  isOpen,
+  onClose,
+  title,
+}: {
+  children: React.ReactNode;
+  eyebrow?: string;
+  icon?: React.ReactNode;
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+}) {
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-modal="true"
+        className="modal-dialog"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="modal-header">
+          <div className="modal-title">
+            {icon && <span>{icon}</span>}
+            <div>
+              {eyebrow && <p className="eyebrow">{eyebrow}</p>}
+              <h2>{title}</h2>
+            </div>
+          </div>
+          <button className="modal-close" title="Chiudi" type="button" onClick={onClose}>
+            <X size={19} />
+          </button>
+        </header>
+        {children}
+      </section>
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  confirmLabel,
+  description,
+  isBusy,
+  isOpen,
+  onClose,
+  onConfirm,
+  title,
+}: {
+  confirmLabel: string;
+  description: string;
+  isBusy: boolean;
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+  title: string;
+}) {
+  return (
+    <Modal
+      eyebrow="Conferma operazione"
+      icon={<Trash2 size={20} />}
+      isOpen={isOpen}
+      onClose={isBusy ? () => undefined : onClose}
+      title={title}
+    >
+      <div className="modal-body">
+        <p className="modal-description">{description}</p>
+      </div>
+      <footer className="modal-actions">
+        <button className="secondary-button" disabled={isBusy} type="button" onClick={onClose}>
+          Annulla
+        </button>
+        <button className="danger-button" disabled={isBusy} type="button" onClick={onConfirm}>
+          {isBusy ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+          {confirmLabel}
+        </button>
+      </footer>
+    </Modal>
+  );
+}
+
 function OutboundContactsPanel({
   agentId,
   calls,
   contacts,
   onCreate,
+  onDeleteAllCalls,
   onDelete,
   onRefreshCalls,
   onRefreshPhoneNumbers,
@@ -1110,6 +1446,7 @@ function OutboundContactsPanel({
   calls: OutboundCall[];
   contacts: OutboundContact[];
   onCreate: (input: OutboundContactInput) => Promise<void>;
+  onDeleteAllCalls: () => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onRefreshCalls: () => Promise<void>;
   onRefreshPhoneNumbers: () => Promise<void>;
@@ -1126,7 +1463,10 @@ function OutboundContactsPanel({
 }) {
   const [reference, setReference] = useState("");
   const [phone, setPhone] = useState("");
+  const [isContactModalOpen, setIsContactModalOpen] = useState(false);
+  const [isDeleteCallsModalOpen, setIsDeleteCallsModalOpen] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
+  const [isDeletingCalls, setIsDeletingCalls] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedPhoneNumberId, setSelectedPhoneNumberId] = useState("");
 
@@ -1163,10 +1503,23 @@ function OutboundContactsPanel({
       await onCreate(input);
       setReference("");
       setPhone("");
+      setIsContactModalOpen(false);
     } catch (err) {
       onSetError(err instanceof Error ? err.message : "Creazione contatto fallita");
     } finally {
       setIsCreating(false);
+    }
+  };
+
+  const handleDeleteAllCalls = async () => {
+    setIsDeletingCalls(true);
+    try {
+      await onDeleteAllCalls();
+      setIsDeleteCallsModalOpen(false);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Cancellazione chiamate fallita");
+    } finally {
+      setIsDeletingCalls(false);
     }
   };
 
@@ -1177,32 +1530,14 @@ function OutboundContactsPanel({
           <p className="eyebrow">Chiamate in uscita</p>
           <h2>Anagrafica</h2>
         </div>
-        <Users size={22} />
+        <div className="panel-heading-actions">
+          <button className="small-button primary" type="button" onClick={() => setIsContactModalOpen(true)}>
+            <UserPlus size={16} />
+            Nuovo contatto
+          </button>
+          <Users size={22} />
+        </div>
       </div>
-
-      <form className="contact-create-form" onSubmit={handleCreate}>
-        <input
-          disabled={isCreating}
-          placeholder="Riferimento"
-          value={reference}
-          onChange={(event) => setReference(event.target.value)}
-        />
-        <input
-          disabled={isCreating}
-          placeholder="Numero di telefono"
-          type="tel"
-          value={phone}
-          onChange={(event) => setPhone(event.target.value)}
-        />
-        <button
-          className="icon-button primary"
-          disabled={isCreating || !reference.trim() || !phone.trim()}
-          title="Aggiungi contatto"
-          type="submit"
-        >
-          {isCreating ? <Loader2 className="spin" size={17} /> : <Plus size={17} />}
-        </button>
-      </form>
 
       <div className="outbound-toolbar">
         <label>
@@ -1265,7 +1600,18 @@ function OutboundContactsPanel({
 
       <div className="call-history-heading">
         <h3>Chiamate recenti</h3>
-        <span>{calls.length}</span>
+        <div className="call-history-actions">
+          <span>{calls.length}</span>
+          <button
+            className="small-button danger"
+            disabled={calls.length === 0 || isDeletingCalls}
+            type="button"
+            onClick={() => setIsDeleteCallsModalOpen(true)}
+          >
+            {isDeletingCalls ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
+            Pulisci
+          </button>
+        </div>
       </div>
       <div className="call-history-list">
         {calls.length === 0 ? (
@@ -1274,6 +1620,67 @@ function OutboundContactsPanel({
           calls.map((call) => <OutboundCallRow call={call} key={call.id} />)
         )}
       </div>
+
+      <Modal
+        eyebrow="Anagrafica"
+        icon={<UserPlus size={20} />}
+        isOpen={isContactModalOpen}
+        onClose={isCreating ? () => undefined : () => setIsContactModalOpen(false)}
+        title="Nuovo contatto"
+      >
+        <form onSubmit={handleCreate}>
+          <div className="modal-body modal-form">
+            <label>
+              <span>Riferimento</span>
+              <input
+                autoFocus
+                disabled={isCreating}
+                placeholder="Nome o azienda"
+                value={reference}
+                onChange={(event) => setReference(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Numero di telefono</span>
+              <input
+                disabled={isCreating}
+                placeholder="+39 345 123 4567"
+                type="tel"
+                value={phone}
+                onChange={(event) => setPhone(event.target.value)}
+              />
+            </label>
+          </div>
+          <footer className="modal-actions">
+            <button
+              className="secondary-button"
+              disabled={isCreating}
+              type="button"
+              onClick={() => setIsContactModalOpen(false)}
+            >
+              Annulla
+            </button>
+            <button
+              className="primary-button"
+              disabled={isCreating || !reference.trim() || !phone.trim()}
+              type="submit"
+            >
+              {isCreating ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}
+              Aggiungi contatto
+            </button>
+          </footer>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        confirmLabel="Cancella cronologia"
+        description="Verranno eliminate tutte le chiamate recenti e le relative trascrizioni salvate. Contatti e appuntamenti non saranno modificati."
+        isBusy={isDeletingCalls}
+        isOpen={isDeleteCallsModalOpen}
+        onClose={() => setIsDeleteCallsModalOpen(false)}
+        onConfirm={() => void handleDeleteAllCalls()}
+        title="Pulire le chiamate recenti?"
+      />
     </section>
   );
 }
@@ -1295,6 +1702,7 @@ function OutboundContactRow({
 }) {
   const [reference, setReference] = useState(contact.reference);
   const [phone, setPhone] = useState(contact.phone);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
 
   useEffect(() => {
@@ -1314,10 +1722,6 @@ function OutboundContactRow({
   };
 
   const handleDelete = async () => {
-    if (!window.confirm(`Eliminare il contatto ${contact.reference}?`)) {
-      return;
-    }
-
     setIsBusy(true);
     try {
       await onDelete(contact.id);
@@ -1341,50 +1745,61 @@ function OutboundContactRow({
   const isUnchanged = reference === contact.reference && phone === contact.phone;
 
   return (
-    <article className="contact-row">
-      <input
-        aria-label="Riferimento"
-        disabled={isBusy}
-        value={reference}
-        onChange={(event) => setReference(event.target.value)}
-      />
-      <input
-        aria-label="Numero di telefono"
-        disabled={isBusy}
-        type="tel"
-        value={phone}
-        onChange={(event) => setPhone(event.target.value)}
-      />
-      <div className="contact-actions">
-        <button
-          className="icon-button contact-icon-button call"
-          disabled={isBusy || !canCall}
-          title="Chiama contatto"
-          type="button"
-          onClick={handleCall}
-        >
-          {isBusy ? <Loader2 className="spin" size={16} /> : <PhoneOutgoing size={16} />}
-        </button>
-        <button
-          className="icon-button contact-icon-button"
-          disabled={isBusy || isUnchanged || !reference.trim() || !phone.trim()}
-          title="Salva modifiche"
-          type="button"
-          onClick={handleUpdate}
-        >
-          {isBusy ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-        </button>
-        <button
-          className="icon-button contact-icon-button danger"
+    <>
+      <article className="contact-row">
+        <input
+          aria-label="Riferimento"
           disabled={isBusy}
-          title="Elimina contatto"
-          type="button"
-          onClick={handleDelete}
-        >
-          <Trash2 size={16} />
-        </button>
-      </div>
-    </article>
+          value={reference}
+          onChange={(event) => setReference(event.target.value)}
+        />
+        <input
+          aria-label="Numero di telefono"
+          disabled={isBusy}
+          type="tel"
+          value={phone}
+          onChange={(event) => setPhone(event.target.value)}
+        />
+        <div className="contact-actions">
+          <button
+            className="icon-button contact-icon-button call"
+            disabled={isBusy || !canCall}
+            title="Chiama contatto"
+            type="button"
+            onClick={handleCall}
+          >
+            {isBusy ? <Loader2 className="spin" size={16} /> : <PhoneOutgoing size={16} />}
+          </button>
+          <button
+            className="icon-button contact-icon-button"
+            disabled={isBusy || isUnchanged || !reference.trim() || !phone.trim()}
+            title="Salva modifiche"
+            type="button"
+            onClick={handleUpdate}
+          >
+            {isBusy ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+          </button>
+          <button
+            className="icon-button contact-icon-button danger"
+            disabled={isBusy}
+            title="Elimina contatto"
+            type="button"
+            onClick={() => setIsDeleteModalOpen(true)}
+          >
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </article>
+      <ConfirmDialog
+        confirmLabel="Elimina contatto"
+        description={`Il contatto ${contact.reference} verrà rimosso dall'anagrafica. La cronologia delle chiamate resterà disponibile.`}
+        isBusy={isBusy}
+        isOpen={isDeleteModalOpen}
+        onClose={() => setIsDeleteModalOpen(false)}
+        onConfirm={() => void handleDelete()}
+        title="Eliminare questo contatto?"
+      />
+    </>
   );
 }
 
@@ -2369,16 +2784,14 @@ function AppointmentsPanel({
   onDeleteAll: () => Promise<void>;
   onSetError: (value: string | null) => void;
 }) {
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
   const handleDeleteAll = async () => {
-    if (!window.confirm("Cancellare tutti gli appuntamenti?")) {
-      return;
-    }
-
     setIsDeleting(true);
     try {
       await onDeleteAll();
+      setIsDeleteModalOpen(false);
     } catch (err) {
       onSetError(err instanceof Error ? err.message : "Cancellazione appuntamenti fallita");
     } finally {
@@ -2398,7 +2811,7 @@ function AppointmentsPanel({
             className="small-button danger"
             disabled={appointments.length === 0 || isDeleting}
             type="button"
-            onClick={handleDeleteAll}
+            onClick={() => setIsDeleteModalOpen(true)}
           >
             {isDeleting ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
             Cancella tutti
@@ -2425,6 +2838,15 @@ function AppointmentsPanel({
           ))
         )}
       </div>
+      <ConfirmDialog
+        confirmLabel="Cancella appuntamenti"
+        description="Verranno eliminati tutti gli appuntamenti salvati. Questa operazione non modifica contatti e cronologia chiamate."
+        isBusy={isDeleting}
+        isOpen={isDeleteModalOpen}
+        onClose={() => setIsDeleteModalOpen(false)}
+        onConfirm={() => void handleDeleteAll()}
+        title="Cancellare tutti gli appuntamenti?"
+      />
     </section>
   );
 }

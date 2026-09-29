@@ -1703,6 +1703,15 @@ def list_outbound_calls() -> list[OutboundCall]:
     return [row_to_outbound_call(row) for row in rows]
 
 
+@app.delete("/api/outbound-calls")
+def delete_all_outbound_calls() -> dict[str, int]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute("DELETE FROM outbound_calls")
+        conn.commit()
+    return {"deleted": cursor.rowcount}
+
+
 def insert_appointment(payload: AppointmentIn) -> Appointment:
     ensure_storage()
     created_at = utc_now()

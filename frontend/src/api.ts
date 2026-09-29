@@ -330,3 +330,9 @@ export function startOutboundCall(input: OutboundCallInput) {
 export function listOutboundCalls() {
   return request<OutboundCall[]>("/api/outbound-calls");
 }
+
+export function deleteAllOutboundCalls() {
+  return request<{ deleted: number }>("/api/outbound-calls", {
+    method: "DELETE",
+  });
+}
