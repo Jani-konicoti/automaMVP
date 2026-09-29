@@ -32,6 +32,39 @@ export type OutboundContactInput = {
   phone: string;
 };
 
+export type OutboundCall = {
+  id: number;
+  contact_id?: number | null;
+  reference: string;
+  phone: string;
+  agent_id: string;
+  agent_phone_number_id?: string | null;
+  source?: string | null;
+  conversation_id?: string | null;
+  call_sid?: string | null;
+  status: string;
+  transcript: string;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+};
+
+export type OutboundCallInput = {
+  contact_id: number;
+  agent_id: string;
+  agent_phone_number_id: string;
+  source?: string | null;
+};
+
+export type ElevenLabsPhoneNumber = {
+  phone_number_id: string;
+  label: string;
+  phone_number: string;
+  provider: string;
+  supports_outbound: boolean;
+};
+
 export type Knowledge = {
   behavior: string;
   documentation: string;
@@ -53,6 +86,12 @@ export type ElevenLabsConfig = {
   inbound_agent_id?: string | null;
   outbound_agent_id?: string | null;
   presentation_agent_id?: string | null;
+  inbound_source?: string | null;
+  outbound_source?: string | null;
+  presentation_source?: string | null;
+  public_base_url: string;
+  tool_webhook_secret: string;
+  post_call_webhook_secret: string;
   configured: boolean;
 };
 
@@ -65,6 +104,11 @@ export type ElevenLabsDefaults = {
 export type ElevenLabsAgentInput = {
   name: string;
   agent_id: string;
+};
+
+export type ElevenLabsIntegrationInput = {
+  public_base_url: string;
+  post_call_webhook_secret: string;
 };
 
 export type VectorStoreStats = {
@@ -129,6 +173,23 @@ export function saveElevenLabsDefaults(defaults: ElevenLabsDefaults) {
   return request<ElevenLabsConfig>("/api/elevenlabs/config/defaults", {
     method: "PUT",
     body: JSON.stringify(defaults),
+  });
+}
+
+export function saveElevenLabsIntegration(input: ElevenLabsIntegrationInput) {
+  return request<ElevenLabsConfig>("/api/elevenlabs/config/integration", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function saveFlowSource(
+  flow: "centralino-entrata" | "centralino-uscita" | "presentazione",
+  source: string | null,
+) {
+  return request<ElevenLabsConfig>("/api/elevenlabs/config/source", {
+    method: "PUT",
+    body: JSON.stringify({ flow, source }),
   });
 }
 
@@ -213,6 +274,10 @@ export function getConversationToken(agentId?: string | null) {
   );
 }
 
+export function listElevenLabsPhoneNumbers() {
+  return request<ElevenLabsPhoneNumber[]>("/api/elevenlabs/phone-numbers");
+}
+
 export function createAppointment(input: AppointmentInput) {
   return request<Appointment>("/api/appointments", {
     method: "POST",
@@ -252,4 +317,16 @@ export function deleteOutboundContact(id: number) {
   return request<{ deleted: number }>(`/api/outbound-contacts/${id}`, {
     method: "DELETE",
   });
+}
+
+
+export function startOutboundCall(input: OutboundCallInput) {
+  return request<OutboundCall>("/api/outbound-calls", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listOutboundCalls() {
+  return request<OutboundCall[]>("/api/outbound-calls");
 }

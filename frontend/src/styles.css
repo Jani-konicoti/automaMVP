@@ -382,6 +382,26 @@ textarea:focus {
   justify-self: start;
 }
 
+.agent-management-panel {
+  grid-column: 1 / -1;
+}
+
+.webhook-endpoints {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.webhook-endpoints code {
+  background: #f1f4ee;
+  border: 1px solid #dfe5dc;
+  border-radius: 6px;
+  color: #314038;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
 .compact-action {
   margin-top: 12px;
   max-width: 220px;
@@ -779,6 +799,29 @@ textarea:focus {
   overflow: auto;
 }
 
+.outbound-toolbar {
+  align-items: end;
+  background: #f4f6f1;
+  border: 1px solid #dfe5dc;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  margin-bottom: 12px;
+  padding: 10px;
+}
+
+.outbound-toolbar label {
+  display: grid;
+  gap: 6px;
+}
+
+.outbound-toolbar label > span {
+  color: #526056;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
 .contact-row {
   align-items: center;
   background: #f8faf6;
@@ -809,6 +852,106 @@ textarea:focus {
   background: #fff1ed;
   border-color: #f0c9bd;
   color: #7a2e25;
+}
+
+.contact-icon-button.call {
+  background: #1f6f5b;
+  border-color: #1f6f5b;
+  color: #ffffff;
+}
+
+.call-history-heading {
+  align-items: center;
+  border-top: 1px solid #dfe5dc;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
+.call-history-heading h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.call-history-heading span {
+  color: #667064;
+  font-size: 0.82rem;
+}
+
+.call-history-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.call-history-row {
+  background: #f8faf6;
+  border: 1px solid #dfe5dc;
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+}
+
+.call-history-meta,
+.call-history-details {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.call-history-details,
+.call-history-row small {
+  color: #667064;
+  font-size: 0.78rem;
+}
+
+.call-status {
+  background: #edf2ea;
+  border-radius: 999px;
+  color: #526056;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 4px 8px;
+}
+
+.call-status.done,
+.call-status.completed {
+  background: #e2f1e6;
+  color: #256044;
+}
+
+.call-status.failed {
+  background: #fff1ed;
+  color: #7a2e25;
+}
+
+.call-error {
+  color: #7a2e25;
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.call-history-row details summary {
+  color: #314038;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.call-history-row pre {
+  color: #314038;
+  font-family: inherit;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .appointment-card {
@@ -944,7 +1087,8 @@ textarea:focus {
   }
 
   .contact-create-form,
-  .contact-row {
+  .contact-row,
+  .outbound-toolbar {
     grid-template-columns: 1fr;
   }
 

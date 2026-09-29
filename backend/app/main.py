@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import os
 import json
+import hashlib
+import hmac
 import math
 import re
+import secrets
 import sqlite3
+import time
 from collections import Counter
 from datetime import datetime
 from io import BytesIO
@@ -13,7 +17,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pypdf import PdfReader
 from pydantic import BaseModel, Field
@@ -41,7 +45,7 @@ DEV_ORIGINS = {
     "http://127.0.0.1:5174",
 }
 
-app = FastAPI(title="CP DEMO")
+app = FastAPI(title="JK Automa")
 
 app.add_middleware(
     CORSMiddleware,
@@ -108,7 +112,31 @@ class ElevenLabsConfig(BaseModel):
     inbound_agent_id: str | None
     outbound_agent_id: str | None
     presentation_agent_id: str | None
+    inbound_source: str | None
+    outbound_source: str | None
+    presentation_source: str | None
+    public_base_url: str
+    tool_webhook_secret: str
+    post_call_webhook_secret: str
     configured: bool
+
+
+class ElevenLabsIntegrationIn(BaseModel):
+    public_base_url: str = Field(default="", max_length=500)
+    post_call_webhook_secret: str = Field(default="", max_length=500)
+
+
+class FlowSourceIn(BaseModel):
+    flow: str = Field(pattern="^(centralino-entrata|centralino-uscita|presentazione)$")
+    source: str | None = Field(default=None, max_length=500)
+
+
+class ElevenLabsPhoneNumber(BaseModel):
+    phone_number_id: str
+    label: str
+    phone_number: str
+    provider: str
+    supports_outbound: bool = True
 
 
 class VectorStoreStats(BaseModel):
@@ -163,6 +191,39 @@ class OutboundContact(OutboundContactIn):
     id: int
     created_at: str
     updated_at: str
+
+
+class OutboundCallIn(BaseModel):
+    contact_id: int
+    agent_id: str = Field(min_length=1, max_length=180)
+    agent_phone_number_id: str = Field(min_length=1, max_length=180)
+    source: str | None = Field(default=None, max_length=500)
+
+
+class OutboundCall(BaseModel):
+    id: int
+    contact_id: int | None
+    reference: str
+    phone: str
+    agent_id: str
+    agent_phone_number_id: str | None
+    source: str | None
+    conversation_id: str | None
+    call_sid: str | None
+    status: str
+    transcript: str
+    error: str | None
+    created_at: str
+    updated_at: str
+    completed_at: str | None
+
+
+class ToolKnowledgeIn(BaseModel):
+    query: str = Field(min_length=1, max_length=1000)
+    limit: int = Field(default=4, ge=1, le=6)
+    conversation_id: str | None = Field(default=None, max_length=180)
+    agent_id: str | None = Field(default=None, max_length=180)
+    knowledge_source: str | None = Field(default=None, max_length=500)
 
 
 TOKEN_RE = re.compile(r"[a-zA-ZÀ-ÿ0-9]{2,}")
@@ -299,6 +360,12 @@ def ensure_storage() -> None:
                 inbound_agent_id TEXT,
                 outbound_agent_id TEXT,
                 presentation_agent_id TEXT,
+                inbound_source TEXT,
+                outbound_source TEXT,
+                presentation_source TEXT,
+                public_base_url TEXT NOT NULL DEFAULT '',
+                tool_webhook_secret TEXT NOT NULL DEFAULT '',
+                post_call_webhook_secret TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             )
             """
@@ -322,9 +389,51 @@ def ensure_storage() -> None:
             "inbound_agent_id",
             "outbound_agent_id",
             "presentation_agent_id",
+            "inbound_source",
+            "outbound_source",
+            "presentation_source",
         ):
             if column_name not in config_columns:
                 conn.execute(f"ALTER TABLE elevenlabs_config ADD COLUMN {column_name} TEXT")
+        for column_name in (
+            "public_base_url",
+            "tool_webhook_secret",
+            "post_call_webhook_secret",
+        ):
+            if column_name not in config_columns:
+                conn.execute(
+                    f"ALTER TABLE elevenlabs_config ADD COLUMN {column_name} "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outbound_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contact_id INTEGER,
+                reference TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_phone_number_id TEXT,
+                source TEXT,
+                conversation_id TEXT UNIQUE,
+                call_sid TEXT,
+                status TEXT NOT NULL,
+                transcript_json TEXT,
+                transcript_text TEXT NOT NULL DEFAULT '',
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (contact_id) REFERENCES outbound_contacts(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_outbound_calls_created_at
+            ON outbound_calls (created_at DESC)
+            """
+        )
         behaviors_count = conn.execute("SELECT COUNT(*) FROM bot_behaviors").fetchone()[0]
         if behaviors_count == 0:
             now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -341,10 +450,25 @@ def ensure_storage() -> None:
         if config_count == 0:
             conn.execute(
                 """
-                INSERT INTO elevenlabs_config (id, api_key, updated_at)
-                VALUES (1, ?, ?)
+                INSERT INTO elevenlabs_config (
+                    id, api_key, tool_webhook_secret, updated_at
+                )
+                VALUES (1, ?, ?, ?)
                 """,
-                (os.getenv("ELEVENLABS_API_KEY", "").strip(), now),
+                (
+                    os.getenv("ELEVENLABS_API_KEY", "").strip(),
+                    secrets.token_urlsafe(32),
+                    now,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE elevenlabs_config
+                SET tool_webhook_secret = ?
+                WHERE id = 1 AND COALESCE(tool_webhook_secret, '') = ''
+                """,
+                (secrets.token_urlsafe(32),),
             )
         agents_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_agents").fetchone()[0]
         env_agent_id = os.getenv("ELEVENLABS_AGENT_ID", "").strip()
@@ -453,6 +577,12 @@ def get_elevenlabs_config_payload() -> ElevenLabsConfig:
         inbound_agent_id=config["inbound_agent_id"] if config else None,
         outbound_agent_id=config["outbound_agent_id"] if config else None,
         presentation_agent_id=config["presentation_agent_id"] if config else None,
+        inbound_source=config["inbound_source"] if config else None,
+        outbound_source=config["outbound_source"] if config else None,
+        presentation_source=config["presentation_source"] if config else None,
+        public_base_url=config["public_base_url"] if config else "",
+        tool_webhook_secret=config["tool_webhook_secret"] if config else "",
+        post_call_webhook_secret=config["post_call_webhook_secret"] if config else "",
         configured=bool(api_key and agents),
     )
 
@@ -497,6 +627,26 @@ def row_to_outbound_contact(row: sqlite3.Row) -> OutboundContact:
         phone=row["phone"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def row_to_outbound_call(row: sqlite3.Row) -> OutboundCall:
+    return OutboundCall(
+        id=row["id"],
+        contact_id=row["contact_id"],
+        reference=row["reference"],
+        phone=row["phone"],
+        agent_id=row["agent_id"],
+        agent_phone_number_id=row["agent_phone_number_id"],
+        source=row["source"],
+        conversation_id=row["conversation_id"],
+        call_sid=row["call_sid"],
+        status=row["status"],
+        transcript=row["transcript_text"] or "",
+        error=row["error"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        completed_at=row["completed_at"],
     )
 
 
@@ -716,6 +866,123 @@ def list_vector_sources() -> list[VectorStoreSource]:
             )
 
     return sources
+
+
+def utc_now() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def normalize_public_url(value: str) -> str:
+    value = value.strip().rstrip("/")
+    if value and not value.startswith("https://"):
+        raise HTTPException(
+            status_code=400,
+            detail="L'URL pubblico deve iniziare con https://",
+        )
+    return value
+
+
+def ensure_known_source(source: str | None) -> str | None:
+    normalized = source.strip() if source else None
+    if not normalized:
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        found = conn.execute(
+            "SELECT 1 FROM vector_chunks WHERE source = ? LIMIT 1",
+            (normalized,),
+        ).fetchone()
+    if not found:
+        raise HTTPException(status_code=400, detail="Fonte PDF non trovata")
+    return normalized
+
+
+def require_tool_secret(provided_secret: str | None) -> None:
+    config = get_elevenlabs_config_payload()
+    if not provided_secret or not hmac.compare_digest(
+        provided_secret,
+        config.tool_webhook_secret,
+    ):
+        raise HTTPException(status_code=401, detail="Webhook tool non autorizzato")
+
+
+def resolve_tool_source(
+    conversation_id: str | None,
+    agent_id: str | None,
+    requested_source: str | None,
+) -> str | None:
+    if requested_source:
+        return ensure_known_source(requested_source)
+
+    if conversation_id:
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT source FROM outbound_calls WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+        if row and row[0]:
+            return row[0]
+
+    if not agent_id:
+        return None
+
+    config = get_elevenlabs_config_payload()
+    agent_source_pairs = (
+        (config.inbound_agent_id, config.inbound_source),
+        (config.outbound_agent_id, config.outbound_source),
+        (config.presentation_agent_id, config.presentation_source),
+    )
+    for configured_agent_id, source in agent_source_pairs:
+        if configured_agent_id == agent_id:
+            return source
+    return None
+
+
+def verify_elevenlabs_signature(
+    raw_body: bytes,
+    signature_header: str | None,
+    secret: str,
+) -> None:
+    if not secret:
+        raise HTTPException(status_code=503, detail="Webhook post-call non configurato")
+    if not signature_header:
+        raise HTTPException(status_code=401, detail="Firma ElevenLabs mancante")
+
+    try:
+        values = dict(
+            part.split("=", 1) for part in signature_header.split(",") if "=" in part
+        )
+        timestamp = values["t"]
+        signature = values["v0"]
+        if abs(time.time() - int(timestamp)) > 30 * 60:
+            raise ValueError("Firma scaduta")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Firma ElevenLabs non valida") from exc
+
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        timestamp.encode("utf-8") + b"." + raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=401, detail="Firma ElevenLabs non valida")
+
+
+def transcript_to_text(transcript: Any) -> str:
+    if not isinstance(transcript, list):
+        return ""
+
+    lines: list[str] = []
+    for entry in transcript:
+        if not isinstance(entry, dict):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, str) or not message.strip():
+            continue
+        role = entry.get("role")
+        label = "Agente" if role in {"agent", "ai"} else "Utente"
+        lines.append(f"{label}: {message.strip()}")
+    return "\n\n".join(lines)
 
 
 @app.on_event("startup")
@@ -1017,6 +1284,46 @@ def save_elevenlabs_defaults(payload: ElevenLabsDefaultsIn) -> ElevenLabsConfig:
     return get_elevenlabs_config_payload()
 
 
+@app.put("/api/elevenlabs/config/integration", response_model=ElevenLabsConfig)
+def save_elevenlabs_integration(payload: ElevenLabsIntegrationIn) -> ElevenLabsConfig:
+    ensure_storage()
+    public_base_url = normalize_public_url(payload.public_base_url)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE elevenlabs_config
+            SET public_base_url = ?, post_call_webhook_secret = ?, updated_at = ?
+            WHERE id = 1
+            """,
+            (
+                public_base_url,
+                payload.post_call_webhook_secret.strip(),
+                utc_now(),
+            ),
+        )
+        conn.commit()
+    return get_elevenlabs_config_payload()
+
+
+@app.put("/api/elevenlabs/config/source", response_model=ElevenLabsConfig)
+def save_flow_source(payload: FlowSourceIn) -> ElevenLabsConfig:
+    ensure_storage()
+    source = ensure_known_source(payload.source)
+    column_by_flow = {
+        "centralino-entrata": "inbound_source",
+        "centralino-uscita": "outbound_source",
+        "presentazione": "presentation_source",
+    }
+    column_name = column_by_flow[payload.flow]
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            f"UPDATE elevenlabs_config SET {column_name} = ?, updated_at = ? WHERE id = 1",
+            (source, utc_now()),
+        )
+        conn.commit()
+    return get_elevenlabs_config_payload()
+
+
 @app.post("/api/elevenlabs/agents", response_model=ElevenLabsAgent)
 def create_elevenlabs_agent(payload: ElevenLabsAgentIn) -> ElevenLabsAgent:
     ensure_storage()
@@ -1225,10 +1532,180 @@ async def get_conversation_token(
     return {"token": token}
 
 
-@app.post("/api/appointments", response_model=Appointment)
-def create_appointment(payload: AppointmentIn) -> Appointment:
+@app.get(
+    "/api/elevenlabs/phone-numbers",
+    response_model=list[ElevenLabsPhoneNumber],
+)
+async def list_elevenlabs_phone_numbers() -> list[ElevenLabsPhoneNumber]:
+    api_key, _ = get_elevenlabs_credentials()
+    url = "https://api.elevenlabs.io/v1/convai/v2/phone-numbers"
+    headers = {"xi-api-key": api_key}
+    params = {"provider": "twilio", "supports_outbound": "true", "page_size": 100}
+    try:
+        async with httpx.AsyncClient(timeout=20, verify=ELEVENLABS_VERIFY_SSL) as client:
+            response = await client.get(url, headers=headers, params=params)
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach ElevenLabs: {exc}",
+        ) from exc
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"ElevenLabs phone numbers error: {response.text}",
+        )
+
+    data = response.json()
+    rows = data.get("phone_numbers", []) if isinstance(data, dict) else data
+    return [
+        ElevenLabsPhoneNumber(
+            phone_number_id=row.get("phone_number_id", ""),
+            label=row.get("label") or row.get("phone_number") or "Numero Twilio",
+            phone_number=row.get("phone_number", ""),
+            provider=row.get("provider", "twilio"),
+            supports_outbound=bool(row.get("supports_outbound", True)),
+        )
+        for row in rows
+        if isinstance(row, dict) and row.get("phone_number_id")
+    ]
+
+
+def normalize_phone_number(value: str) -> str:
+    normalized = re.sub(r"[\s().-]", "", value.strip())
+    if normalized.startswith("00"):
+        normalized = "+" + normalized[2:]
+    if not normalized.startswith("+") and re.fullmatch(r"\d{9,11}", normalized):
+        normalized = "+39" + normalized
+    if not re.fullmatch(r"\+[1-9]\d{7,14}", normalized):
+        raise HTTPException(
+            status_code=400,
+            detail="Numero non valido. Usa il formato internazionale, ad esempio +393451234567.",
+        )
+    return normalized
+
+
+@app.post("/api/outbound-calls", response_model=OutboundCall)
+async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
+    api_key, agent_id = get_elevenlabs_credentials(payload.agent_id)
+    source = ensure_known_source(payload.source)
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        contact = conn.execute(
+            "SELECT * FROM outbound_contacts WHERE id = ?",
+            (payload.contact_id,),
+        ).fetchone()
+    if not contact:
+        raise HTTPException(status_code=404, detail="Contatto non trovato")
+
+    phone = normalize_phone_number(contact["phone"])
+    request_payload = {
+        "agent_id": agent_id,
+        "agent_phone_number_id": payload.agent_phone_number_id.strip(),
+        "to_number": phone,
+    }
+    url = "https://api.elevenlabs.io/v1/convai/twilio/outbound-call"
+    headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=30, verify=ELEVENLABS_VERIFY_SSL) as client:
+            response = await client.post(url, headers=headers, json=request_payload)
+    except httpx.RequestError as exc:
+        error = f"Cannot reach ElevenLabs: {exc}"
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO outbound_calls (
+                    contact_id, reference, phone, agent_id, agent_phone_number_id,
+                    source, status, transcript_text, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?)
+                """,
+                (
+                    payload.contact_id,
+                    contact["reference"],
+                    phone,
+                    agent_id,
+                    payload.agent_phone_number_id.strip(),
+                    source,
+                    error,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        raise HTTPException(status_code=502, detail=error) from exc
+
+    data = response.json() if response.content else {}
+    if response.status_code >= 400 or not data.get("success"):
+        error = data.get("detail") or data.get("message") or response.text
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                INSERT INTO outbound_calls (
+                    contact_id, reference, phone, agent_id, agent_phone_number_id,
+                    source, status, transcript_text, error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?)
+                """,
+                (
+                    payload.contact_id,
+                    contact["reference"],
+                    phone,
+                    agent_id,
+                    payload.agent_phone_number_id.strip(),
+                    source,
+                    str(error),
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        raise HTTPException(status_code=502, detail=f"Chiamata ElevenLabs fallita: {error}")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            """
+            INSERT INTO outbound_calls (
+                contact_id, reference, phone, agent_id, agent_phone_number_id,
+                source, conversation_id, call_sid, status, transcript_text,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'initiated', '', ?, ?)
+            """,
+            (
+                payload.contact_id,
+                contact["reference"],
+                phone,
+                agent_id,
+                payload.agent_phone_number_id.strip(),
+                source,
+                data.get("conversation_id"),
+                data.get("callSid") or data.get("call_sid"),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM outbound_calls WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    return row_to_outbound_call(row)
+
+
+@app.get("/api/outbound-calls", response_model=list[OutboundCall])
+def list_outbound_calls() -> list[OutboundCall]:
     ensure_storage()
-    created_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM outbound_calls ORDER BY created_at DESC, id DESC LIMIT 100"
+        ).fetchall()
+    return [row_to_outbound_call(row) for row in rows]
+
+
+def insert_appointment(payload: AppointmentIn) -> Appointment:
+    ensure_storage()
+    created_at = utc_now()
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
@@ -1250,8 +1727,12 @@ def create_appointment(payload: AppointmentIn) -> Appointment:
             "SELECT * FROM appointments WHERE id = ?",
             (cursor.lastrowid,),
         ).fetchone()
-
     return row_to_appointment(row)
+
+
+@app.post("/api/appointments", response_model=Appointment)
+def create_appointment(payload: AppointmentIn) -> Appointment:
+    return insert_appointment(payload)
 
 
 @app.get("/api/appointments", response_model=list[Appointment])
@@ -1350,3 +1831,175 @@ def delete_outbound_contact(contact_id: int) -> dict[str, int]:
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Contatto non trovato")
     return {"deleted": cursor.rowcount}
+
+
+@app.post("/api/tools/search-knowledge")
+def tool_search_knowledge(
+    payload: ToolKnowledgeIn,
+    x_jk_automa_key: str | None = Header(default=None, alias="X-JK-Automa-Key"),
+) -> dict[str, Any]:
+    require_tool_secret(x_jk_automa_key)
+    source = resolve_tool_source(
+        payload.conversation_id,
+        payload.agent_id,
+        payload.knowledge_source,
+    )
+    results = search_vector_chunks(payload.query.strip(), payload.limit, source)
+    if not results:
+        return {
+            "success": True,
+            "source": source or "tutte le fonti",
+            "message": "Nessuna informazione pertinente trovata nella documentazione.",
+            "results": [],
+        }
+    return {
+        "success": True,
+        "source": source or "tutte le fonti",
+        "message": f"Trovati {len(results)} passaggi pertinenti.",
+        "results": [
+            {
+                "source": result.source,
+                "chunk": result.chunk_index + 1,
+                "score": result.score,
+                "text": result.text,
+            }
+            for result in results
+        ],
+    }
+
+
+@app.post("/api/tools/schedule-appointment")
+def tool_schedule_appointment(
+    payload: AppointmentIn,
+    x_jk_automa_key: str | None = Header(default=None, alias="X-JK-Automa-Key"),
+) -> dict[str, Any]:
+    require_tool_secret(x_jk_automa_key)
+    appointment = insert_appointment(payload)
+    return {
+        "success": True,
+        "message": (
+            f"Appuntamento registrato per {appointment.customer_name} "
+            f"il {appointment.date} alle {appointment.time}."
+        ),
+        "appointment": {
+            "customer_name": appointment.customer_name,
+            "phone": appointment.phone,
+            "date": appointment.date,
+            "time": appointment.time,
+            "notes": appointment.notes,
+        },
+    }
+
+
+def webhook_phone_details(data: dict[str, Any]) -> tuple[str, str | None]:
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return "Numero non disponibile", None
+    body = metadata.get("body")
+    if not isinstance(body, dict):
+        body = metadata
+
+    phone = (
+        body.get("to_number")
+        or body.get("To")
+        or body.get("called_number")
+        or "Numero non disponibile"
+    )
+    call_sid = body.get("call_sid") or body.get("CallSid")
+    return str(phone), str(call_sid) if call_sid else None
+
+
+@app.post("/api/webhooks/elevenlabs/post-call")
+async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
+    ensure_storage()
+    raw_body = await request.body()
+    config = get_elevenlabs_config_payload()
+    verify_elevenlabs_signature(
+        raw_body,
+        request.headers.get("ElevenLabs-Signature"),
+        config.post_call_webhook_secret,
+    )
+    try:
+        event = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Payload JSON non valido") from exc
+
+    event_type = event.get("type")
+    data = event.get("data")
+    if not isinstance(data, dict) or event_type not in {
+        "post_call_transcription",
+        "call_initiation_failure",
+    }:
+        return {"status": "ignored"}
+
+    conversation_id = data.get("conversation_id")
+    if not conversation_id:
+        return {"status": "ignored"}
+
+    now = utc_now()
+    phone, metadata_call_sid = webhook_phone_details(data)
+    call_sid = data.get("call_sid") or metadata_call_sid
+    agent_id = str(data.get("agent_id") or "unknown")
+    agent_name = str(data.get("agent_name") or "Chiamata ElevenLabs")
+    transcript = data.get("transcript")
+    transcript_text = transcript_to_text(transcript)
+    if event_type == "call_initiation_failure":
+        status = "failed"
+        error = str(data.get("failure_reason") or "Avvio chiamata fallito")
+        completed_at = now
+    else:
+        status = str(data.get("status") or "completed")
+        error = None
+        completed_at = now
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            "SELECT id FROM outbound_calls WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE outbound_calls
+                SET call_sid = COALESCE(?, call_sid), status = ?, transcript_json = ?,
+                    transcript_text = ?, error = ?, updated_at = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    call_sid,
+                    status,
+                    json.dumps(transcript, ensure_ascii=False) if transcript else None,
+                    transcript_text,
+                    error,
+                    now,
+                    completed_at,
+                    existing["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO outbound_calls (
+                    contact_id, reference, phone, agent_id, agent_phone_number_id,
+                    source, conversation_id, call_sid, status, transcript_json,
+                    transcript_text, error, created_at, updated_at, completed_at
+                ) VALUES (NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    agent_name,
+                    phone,
+                    agent_id,
+                    conversation_id,
+                    call_sid,
+                    status,
+                    json.dumps(transcript, ensure_ascii=False) if transcript else None,
+                    transcript_text,
+                    error,
+                    now,
+                    now,
+                    completed_at,
+                ),
+            )
+        conn.commit()
+    return {"status": "received"}

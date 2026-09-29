@@ -1,4 +1,4 @@
-# CP DEMO
+# JK Automa
 
 Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 
@@ -8,8 +8,9 @@ Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 - Selezioni separatamente agente e fonte per Centralino e Presentazione.
 - Avvii una conversazione vocale realtime con un agente ElevenLabs.
 - L'agente risponde usando la knowledge inserita nel prompt di sessione.
-- Quando l'utente chiede un appuntamento, l'agente chiama il client tool `scheduleAppointment`.
-- Il tool chiama FastAPI e salva l'appuntamento in SQLite.
+- Le sessioni browser usano client tool; le chiamate telefoniche usano webhook tool server-side.
+- L'agente cerca nei PDF e salva gli appuntamenti in SQLite anche durante le chiamate Twilio.
+- Il Centralino Uscita avvia chiamate reali e conserva stato e trascrizione.
 
 ## Setup backend
 
@@ -54,9 +55,17 @@ Apri `http://localhost:5173`.
 
 ## Configurazione ElevenLabs
 
-Nel tuo agente ElevenLabs crea un Client tool:
+Quando il backend ha un URL HTTPS pubblico, sostituisci i due Client tool con due
+Webhook tool mantenendo gli stessi nomi. I Webhook tool funzionano sia nelle
+sessioni browser sia nelle chiamate telefoniche. Usa gli URL mostrati nella pagina
+`Configurazione` e l'header `X-JK-Automa-Key`.
+
+Webhook `scheduleAppointment`:
 
 - Name: `scheduleAppointment`
+- Method: `POST`
+- URL: `/api/tools/schedule-appointment`
+- Header: `X-JK-Automa-Key`, valore mostrato nella configurazione
 - Description: `Create an appointment after collecting customer name, date, time, phone if available, and appointment notes.`
 - Wait for response: enabled
 - Parameters:
@@ -72,4 +81,16 @@ Nel prompt base dell'agente puoi mettere una frase minima, ad esempio:
 You are an Italian receptionist. Follow the session prompt and use the available tools when needed.
 ```
 
-Il frontend passa il contesto operativo all'inizio della sessione e usa i tool configurati per appuntamenti e knowledge.
+Webhook `searchKnowledge`:
+
+- Method: `POST`
+- URL: `/api/tools/search-knowledge`
+- Header: `X-JK-Automa-Key`, valore mostrato nella configurazione
+- `query`, string, required
+- `limit`, integer, optional
+- `conversation_id`, dynamic variable `system__conversation_id`
+- `agent_id`, dynamic variable `system__agent_id`
+- `knowledge_source`, dynamic variable `knowledge_source`, optional
+
+In `Developers > Webhooks` configura anche il post-call webhook mostrato nell'app,
+abilita l'evento di trascrizione e salva nell'app il signing secret generato da ElevenLabs.

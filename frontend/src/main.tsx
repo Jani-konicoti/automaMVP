@@ -13,7 +13,9 @@ import {
   Mic,
   MicOff,
   PhoneCall,
+  PhoneOutgoing,
   Plus,
+  RefreshCw,
   Save,
   Send,
   Settings,
@@ -28,6 +30,8 @@ import {
   ElevenLabsAgentInput,
   ElevenLabsConfig,
   ElevenLabsDefaults,
+  ElevenLabsPhoneNumber,
+  OutboundCall,
   OutboundContact,
   OutboundContactInput,
   VectorSearchResult,
@@ -45,10 +49,15 @@ import {
   getVectorStoreSources,
   getVectorStoreStats,
   listAppointments,
+  listElevenLabsPhoneNumbers,
+  listOutboundCalls,
   listOutboundContacts,
   saveElevenLabsConfig,
   saveElevenLabsDefaults,
+  saveElevenLabsIntegration,
+  saveFlowSource,
   searchVectorStore,
+  startOutboundCall,
   updateElevenLabsAgent,
   updateOutboundContact,
   uploadVectorStorePdf,
@@ -194,10 +203,18 @@ function App() {
     inbound_agent_id: null,
     outbound_agent_id: null,
     presentation_agent_id: null,
+    inbound_source: null,
+    outbound_source: null,
+    presentation_source: null,
+    public_base_url: "",
+    tool_webhook_secret: "",
+    post_call_webhook_secret: "",
     configured: false,
   });
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [outboundContacts, setOutboundContacts] = useState<OutboundContact[]>([]);
+  const [outboundCalls, setOutboundCalls] = useState<OutboundCall[]>([]);
+  const [phoneNumbers, setPhoneNumbers] = useState<ElevenLabsPhoneNumber[]>([]);
   const [messages, setMessages] = useState<string[]>([]);
   const [presentationTranscript, setPresentationTranscript] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -240,6 +257,16 @@ function App() {
     setOutboundContacts(contacts);
   }, []);
 
+  const refreshOutboundCalls = useCallback(async () => {
+    const calls = await listOutboundCalls();
+    setOutboundCalls(calls);
+  }, []);
+
+  const refreshPhoneNumbers = useCallback(async () => {
+    const numbers = await listElevenLabsPhoneNumbers();
+    setPhoneNumbers(numbers);
+  }, []);
+
   const handleCreateOutboundContact = useCallback(
     async (input: OutboundContactInput) => {
       setError(null);
@@ -274,19 +301,59 @@ function App() {
       getVectorStoreStats(),
       getVectorStoreSources(),
       listOutboundContacts(),
+      listOutboundCalls(),
     ])
-      .then(([configResponse, appointmentRows, stats, sources, contacts]) => {
+      .then(([configResponse, appointmentRows, stats, sources, contacts, calls]) => {
         setElevenLabsConfig(configResponse);
         setAppointments(appointmentRows);
         setVectorStats(stats);
         setVectorSources(sources);
         setOutboundContacts(contacts);
+        setOutboundCalls(calls);
+        const sourceExists = (source?: string | null) =>
+          Boolean(source && sources.some((item) => item.source === source));
+        setInboundVectorSource(
+          sourceExists(configResponse.inbound_source) ? configResponse.inbound_source! : null,
+        );
+        setOutboundVectorSource(
+          sourceExists(configResponse.outbound_source) ? configResponse.outbound_source! : null,
+        );
+        setPresentationVectorSource(
+          sourceExists(configResponse.presentation_source)
+            ? configResponse.presentation_source!
+            : null,
+        );
       })
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : "Errore di inizializzazione");
       })
       .finally(() => setIsLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!elevenLabsConfig.api_key) {
+      setPhoneNumbers([]);
+      return;
+    }
+    refreshPhoneNumbers().catch((err: unknown) => {
+      setMessages((current) => [
+        `numeri Twilio: ${err instanceof Error ? err.message : "caricamento fallito"}`,
+        ...current,
+      ].slice(0, 12));
+    });
+  }, [elevenLabsConfig.api_key, refreshPhoneNumbers]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      Promise.all([refreshAppointments(), refreshOutboundCalls()]).catch(() => {
+        // A transient polling failure is surfaced by the next explicit action.
+      });
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [refreshAppointments, refreshOutboundCalls]);
 
   const refreshElevenLabsConfig = useCallback(async () => {
     const config = await getElevenLabsConfig();
@@ -305,6 +372,54 @@ function App() {
     const config = await saveElevenLabsDefaults(defaults);
     setElevenLabsConfig(config);
   }, []);
+
+  const handleSaveElevenLabsIntegration = useCallback(
+    async (publicBaseUrl: string, postCallWebhookSecret: string) => {
+      setError(null);
+      const config = await saveElevenLabsIntegration({
+        public_base_url: publicBaseUrl,
+        post_call_webhook_secret: postCallWebhookSecret,
+      });
+      setElevenLabsConfig(config);
+    },
+    [],
+  );
+
+  const persistFlowSource = useCallback(
+    async (
+      flow: MainTab,
+      source: string | null,
+      setter: (value: string | null) => void,
+    ) => {
+      setter(source);
+      try {
+        const config = await saveFlowSource(flow, source);
+        setElevenLabsConfig(config);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Salvataggio fonte fallito");
+      }
+    },
+    [],
+  );
+
+  const handleStartOutboundCall = useCallback(
+    async (
+      contactId: number,
+      agentId: string,
+      phoneNumberId: string,
+      source: string | null,
+    ) => {
+      setError(null);
+      const call = await startOutboundCall({
+        contact_id: contactId,
+        agent_id: agentId,
+        agent_phone_number_id: phoneNumberId,
+        source,
+      });
+      setOutboundCalls((current) => [call, ...current.filter((item) => item.id !== call.id)]);
+    },
+    [],
+  );
 
   const handleCreateElevenLabsAgent = useCallback(
     async (input: ElevenLabsAgentInput) => {
@@ -492,7 +607,9 @@ function App() {
       <Shell
         appView={appView}
         appointments={appointments}
+        outboundCalls={outboundCalls}
         outboundContacts={outboundContacts}
+        phoneNumbers={phoneNumbers}
         error={error}
         isLoading={isLoading}
         elevenLabsConfig={elevenLabsConfig}
@@ -507,13 +624,23 @@ function App() {
         onDeleteOutboundContact={handleDeleteOutboundContact}
         onSaveElevenLabsApiKey={handleSaveElevenLabsApiKey}
         onSaveElevenLabsDefaults={handleSaveElevenLabsDefaults}
+        onSaveElevenLabsIntegration={handleSaveElevenLabsIntegration}
+        onStartOutboundCall={handleStartOutboundCall}
+        onRefreshOutboundCalls={refreshOutboundCalls}
+        onRefreshPhoneNumbers={refreshPhoneNumbers}
         onUpdateElevenLabsAgent={handleUpdateElevenLabsAgent}
         onUpdateOutboundContact={handleUpdateOutboundContact}
         onPdfModeChange={setPdfMode}
         onVectorPdfUpload={handleVectorPdfUpload}
-        onInboundVectorSourceChange={setInboundVectorSource}
-        onOutboundVectorSourceChange={setOutboundVectorSource}
-        onPresentationVectorSourceChange={setPresentationVectorSource}
+        onInboundVectorSourceChange={(source) =>
+          void persistFlowSource("centralino-entrata", source, setInboundVectorSource)
+        }
+        onOutboundVectorSourceChange={(source) =>
+          void persistFlowSource("centralino-uscita", source, setOutboundVectorSource)
+        }
+        onPresentationVectorSourceChange={(source) =>
+          void persistFlowSource("presentazione", source, setPresentationVectorSource)
+        }
         onSetError={setError}
         onVoiceContextChange={handleVoiceContextChange}
         pdfMode={pdfMode}
@@ -533,7 +660,9 @@ function App() {
 type ShellProps = {
   appView: AppView;
   appointments: Appointment[];
+  outboundCalls: OutboundCall[];
   outboundContacts: OutboundContact[];
+  phoneNumbers: ElevenLabsPhoneNumber[];
   elevenLabsConfig: ElevenLabsConfig;
   error: string | null;
   isLoading: boolean;
@@ -558,6 +687,18 @@ type ShellProps = {
   onPdfModeChange: (value: "append" | "replace") => void;
   onSaveElevenLabsApiKey: (apiKey: string) => Promise<void>;
   onSaveElevenLabsDefaults: (defaults: ElevenLabsDefaults) => Promise<void>;
+  onSaveElevenLabsIntegration: (
+    publicBaseUrl: string,
+    postCallWebhookSecret: string,
+  ) => Promise<void>;
+  onStartOutboundCall: (
+    contactId: number,
+    agentId: string,
+    phoneNumberId: string,
+    source: string | null,
+  ) => Promise<void>;
+  onRefreshOutboundCalls: () => Promise<void>;
+  onRefreshPhoneNumbers: () => Promise<void>;
   onUpdateElevenLabsAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
   onUpdateOutboundContact: (id: number, input: OutboundContactInput) => Promise<void>;
   onVectorPdfUpload: (files: File[]) => Promise<void>;
@@ -571,7 +712,9 @@ type ShellProps = {
 function Shell({
   appView,
   appointments,
+  outboundCalls,
   outboundContacts,
+  phoneNumbers,
   elevenLabsConfig,
   error,
   isLoading,
@@ -596,6 +739,10 @@ function Shell({
   onPdfModeChange,
   onSaveElevenLabsApiKey,
   onSaveElevenLabsDefaults,
+  onSaveElevenLabsIntegration,
+  onStartOutboundCall,
+  onRefreshOutboundCalls,
+  onRefreshPhoneNumbers,
   onUpdateElevenLabsAgent,
   onUpdateOutboundContact,
   onVectorPdfUpload,
@@ -646,8 +793,8 @@ function Shell({
     <main className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">CP DEMO</p>
-          <h1>CP DEMO</h1>
+          <p className="eyebrow">Automazione vocale</p>
+          <h1>JK Automa</h1>
         </div>
         <div className="topbar-actions">
           <div className="view-tabs">
@@ -688,6 +835,7 @@ function Shell({
           onDeleteAgent={onDeleteElevenLabsAgent}
           onSaveApiKey={onSaveElevenLabsApiKey}
           onSaveDefaults={onSaveElevenLabsDefaults}
+          onSaveIntegration={onSaveElevenLabsIntegration}
           onSetError={onSetError}
           onUpdateAgent={onUpdateElevenLabsAgent}
         />
@@ -745,6 +893,8 @@ function Shell({
               agentId={outboundAgentId}
               appointments={appointments}
               contacts={outboundContacts}
+              outboundCalls={outboundCalls}
+              phoneNumbers={phoneNumbers}
               elevenLabsConfig={elevenLabsConfig}
               flow="centralino-uscita"
               isIndexingPdf={isIndexingPdf}
@@ -755,6 +905,9 @@ function Shell({
               onDeleteContact={onDeleteOutboundContact}
               onPdfModeChange={onPdfModeChange}
               onSetError={onSetError}
+              onStartOutboundCall={onStartOutboundCall}
+              onRefreshOutboundCalls={onRefreshOutboundCalls}
+              onRefreshPhoneNumbers={onRefreshPhoneNumbers}
               onVectorPdfUpload={onVectorPdfUpload}
               onVectorSourceChange={onOutboundVectorSourceChange}
               onVoiceContextChange={onVoiceContextChange}
@@ -792,6 +945,8 @@ function CentralinoPage({
   agentId,
   appointments,
   contacts = [],
+  outboundCalls = [],
+  phoneNumbers = [],
   elevenLabsConfig,
   flow,
   isIndexingPdf,
@@ -802,6 +957,9 @@ function CentralinoPage({
   onDeleteAllAppointments,
   onDeleteContact,
   onSetError,
+  onStartOutboundCall,
+  onRefreshOutboundCalls,
+  onRefreshPhoneNumbers,
   onVectorPdfUpload,
   onVectorSourceChange,
   onVoiceContextChange,
@@ -817,6 +975,8 @@ function CentralinoPage({
   agentId: string | null;
   appointments: Appointment[];
   contacts?: OutboundContact[];
+  outboundCalls?: OutboundCall[];
+  phoneNumbers?: ElevenLabsPhoneNumber[];
   elevenLabsConfig: ElevenLabsConfig;
   flow: "centralino-entrata" | "centralino-uscita";
   isIndexingPdf: boolean;
@@ -827,6 +987,14 @@ function CentralinoPage({
   onDeleteAllAppointments: () => Promise<void>;
   onDeleteContact?: (id: number) => Promise<void>;
   onSetError: (value: string | null) => void;
+  onStartOutboundCall?: (
+    contactId: number,
+    agentId: string,
+    phoneNumberId: string,
+    source: string | null,
+  ) => Promise<void>;
+  onRefreshOutboundCalls?: () => Promise<void>;
+  onRefreshPhoneNumbers?: () => Promise<void>;
   onVectorPdfUpload: (files: File[]) => Promise<void>;
   onVectorSourceChange: (source: string | null) => void;
   onVoiceContextChange: (value: VoiceContext | null) => void;
@@ -894,13 +1062,23 @@ function CentralinoPage({
         {flow === "centralino-uscita" &&
           onCreateContact &&
           onDeleteContact &&
-          onUpdateContact && (
+          onUpdateContact &&
+          onStartOutboundCall &&
+          onRefreshOutboundCalls &&
+          onRefreshPhoneNumbers && (
             <OutboundContactsPanel
+              agentId={agentId}
               contacts={contacts}
+              calls={outboundCalls}
               onCreate={onCreateContact}
               onDelete={onDeleteContact}
+              onRefreshCalls={onRefreshOutboundCalls}
+              onRefreshPhoneNumbers={onRefreshPhoneNumbers}
               onSetError={onSetError}
+              onStartCall={onStartOutboundCall}
               onUpdate={onUpdateContact}
+              phoneNumbers={phoneNumbers}
+              selectedSource={selectedVectorSource}
             />
           )}
         <AppointmentsPanel
@@ -915,21 +1093,63 @@ function CentralinoPage({
 }
 
 function OutboundContactsPanel({
+  agentId,
+  calls,
   contacts,
   onCreate,
   onDelete,
+  onRefreshCalls,
+  onRefreshPhoneNumbers,
   onSetError,
+  onStartCall,
   onUpdate,
+  phoneNumbers,
+  selectedSource,
 }: {
+  agentId: string | null;
+  calls: OutboundCall[];
   contacts: OutboundContact[];
   onCreate: (input: OutboundContactInput) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  onRefreshCalls: () => Promise<void>;
+  onRefreshPhoneNumbers: () => Promise<void>;
   onSetError: (value: string | null) => void;
+  onStartCall: (
+    contactId: number,
+    agentId: string,
+    phoneNumberId: string,
+    source: string | null,
+  ) => Promise<void>;
   onUpdate: (id: number, input: OutboundContactInput) => Promise<void>;
+  phoneNumbers: ElevenLabsPhoneNumber[];
+  selectedSource: string | null;
 }) {
   const [reference, setReference] = useState("");
   const [phone, setPhone] = useState("");
   const [isCreating, setIsCreating] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [selectedPhoneNumberId, setSelectedPhoneNumberId] = useState("");
+
+  useEffect(() => {
+    if (
+      selectedPhoneNumberId &&
+      phoneNumbers.some((number) => number.phone_number_id === selectedPhoneNumberId)
+    ) {
+      return;
+    }
+    setSelectedPhoneNumberId(phoneNumbers[0]?.phone_number_id ?? "");
+  }, [phoneNumbers, selectedPhoneNumberId]);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.all([onRefreshPhoneNumbers(), onRefreshCalls()]);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Aggiornamento chiamate fallito");
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const handleCreate = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -984,6 +1204,36 @@ function OutboundContactsPanel({
         </button>
       </form>
 
+      <div className="outbound-toolbar">
+        <label>
+          <span>Numero chiamante</span>
+          <select
+            className="config-select"
+            value={selectedPhoneNumberId}
+            onChange={(event) => setSelectedPhoneNumberId(event.target.value)}
+          >
+            {phoneNumbers.length === 0 ? (
+              <option value="">Nessun numero Twilio disponibile</option>
+            ) : (
+              phoneNumbers.map((number) => (
+                <option key={number.phone_number_id} value={number.phone_number_id}>
+                  {number.label} ({number.phone_number})
+                </option>
+              ))
+            )}
+          </select>
+        </label>
+        <button
+          className="icon-button contact-icon-button"
+          disabled={isRefreshing}
+          title="Aggiorna numeri e chiamate"
+          type="button"
+          onClick={handleRefresh}
+        >
+          <RefreshCw className={isRefreshing ? "spin" : ""} size={16} />
+        </button>
+      </div>
+
       <div className="contacts-list">
         {contacts.length === 0 ? (
           <p className="muted">Nessun contatto inserito.</p>
@@ -992,11 +1242,36 @@ function OutboundContactsPanel({
             <OutboundContactRow
               contact={contact}
               key={contact.id}
+              canCall={Boolean(agentId && selectedPhoneNumberId)}
               onDelete={onDelete}
+              onCall={() => {
+                if (!agentId || !selectedPhoneNumberId) {
+                  return Promise.resolve();
+                }
+                return onStartCall(
+                  contact.id,
+                  agentId,
+                  selectedPhoneNumberId,
+                  selectedSource,
+                );
+              }}
               onSetError={onSetError}
               onUpdate={onUpdate}
             />
           ))
+        )}
+      </div>
+
+
+      <div className="call-history-heading">
+        <h3>Chiamate recenti</h3>
+        <span>{calls.length}</span>
+      </div>
+      <div className="call-history-list">
+        {calls.length === 0 ? (
+          <p className="muted">Nessuna chiamata avviata.</p>
+        ) : (
+          calls.map((call) => <OutboundCallRow call={call} key={call.id} />)
         )}
       </div>
     </section>
@@ -1004,12 +1279,16 @@ function OutboundContactsPanel({
 }
 
 function OutboundContactRow({
+  canCall,
   contact,
+  onCall,
   onDelete,
   onSetError,
   onUpdate,
 }: {
+  canCall: boolean;
   contact: OutboundContact;
+  onCall: () => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onSetError: (value: string | null) => void;
   onUpdate: (id: number, input: OutboundContactInput) => Promise<void>;
@@ -1048,6 +1327,17 @@ function OutboundContactRow({
     }
   };
 
+  const handleCall = async () => {
+    setIsBusy(true);
+    try {
+      await onCall();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Avvio chiamata fallito");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const isUnchanged = reference === contact.reference && phone === contact.phone;
 
   return (
@@ -1067,6 +1357,15 @@ function OutboundContactRow({
       />
       <div className="contact-actions">
         <button
+          className="icon-button contact-icon-button call"
+          disabled={isBusy || !canCall}
+          title="Chiama contatto"
+          type="button"
+          onClick={handleCall}
+        >
+          {isBusy ? <Loader2 className="spin" size={16} /> : <PhoneOutgoing size={16} />}
+        </button>
+        <button
           className="icon-button contact-icon-button"
           disabled={isBusy || isUnchanged || !reference.trim() || !phone.trim()}
           title="Salva modifiche"
@@ -1085,6 +1384,31 @@ function OutboundContactRow({
           <Trash2 size={16} />
         </button>
       </div>
+    </article>
+  );
+}
+
+
+function OutboundCallRow({ call }: { call: OutboundCall }) {
+  const createdAt = new Date(call.created_at).toLocaleString("it-IT");
+  return (
+    <article className="call-history-row">
+      <div className="call-history-meta">
+        <strong>{call.reference}</strong>
+        <span className={`call-status ${call.status}`}>{call.status}</span>
+      </div>
+      <div className="call-history-details">
+        <span>{call.phone}</span>
+        <span>{createdAt}</span>
+      </div>
+      {call.source && <small>Fonte: {call.source}</small>}
+      {call.error && <p className="call-error">{call.error}</p>}
+      {call.transcript && (
+        <details>
+          <summary>Trascrizione</summary>
+          <pre>{call.transcript}</pre>
+        </details>
+      )}
     </article>
   );
 }
@@ -1381,6 +1705,7 @@ function ConfigPage({
   onDeleteAgent,
   onSaveApiKey,
   onSaveDefaults,
+  onSaveIntegration,
   onSetError,
   onUpdateAgent,
 }: {
@@ -1390,6 +1715,10 @@ function ConfigPage({
   onDeleteAgent: (id: number) => Promise<void>;
   onSaveApiKey: (apiKey: string) => Promise<void>;
   onSaveDefaults: (defaults: ElevenLabsDefaults) => Promise<void>;
+  onSaveIntegration: (
+    publicBaseUrl: string,
+    postCallWebhookSecret: string,
+  ) => Promise<void>;
   onSetError: (value: string | null) => void;
   onUpdateAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
 }) {
@@ -1398,7 +1727,12 @@ function ConfigPage({
   const [newAgentId, setNewAgentId] = useState("");
   const [isSavingKey, setIsSavingKey] = useState(false);
   const [isSavingDefaults, setIsSavingDefaults] = useState(false);
+  const [isSavingIntegration, setIsSavingIntegration] = useState(false);
   const [isCreatingAgent, setIsCreatingAgent] = useState(false);
+  const [publicBaseUrl, setPublicBaseUrl] = useState(config.public_base_url);
+  const [postCallWebhookSecret, setPostCallWebhookSecret] = useState(
+    config.post_call_webhook_secret,
+  );
   const [defaults, setDefaults] = useState<ElevenLabsDefaults>({
     inbound_agent_id: config.inbound_agent_id ?? null,
     outbound_agent_id: config.outbound_agent_id ?? null,
@@ -1408,6 +1742,11 @@ function ConfigPage({
   useEffect(() => {
     setApiKey(config.api_key);
   }, [config.api_key]);
+
+  useEffect(() => {
+    setPublicBaseUrl(config.public_base_url);
+    setPostCallWebhookSecret(config.post_call_webhook_secret);
+  }, [config.post_call_webhook_secret, config.public_base_url]);
 
   useEffect(() => {
     setDefaults({
@@ -1465,6 +1804,20 @@ function ConfigPage({
     }
   };
 
+  const handleSaveIntegration = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setIsSavingIntegration(true);
+    try {
+      await onSaveIntegration(publicBaseUrl.trim(), postCallWebhookSecret.trim());
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Salvataggio webhook fallito");
+    } finally {
+      setIsSavingIntegration(false);
+    }
+  };
+
+  const webhookBase = publicBaseUrl.trim().replace(/\/$/, "");
+
   return (
     <section className="config-grid">
       <div className="workspace-panel">
@@ -1504,7 +1857,67 @@ function ConfigPage({
         </div>
       </div>
 
-      <div className="workspace-panel">
+      <div className="workspace-panel integration-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Telefonia</p>
+            <h2>Webhook ElevenLabs</h2>
+          </div>
+          <Database size={22} />
+        </div>
+
+        <form className="config-form" onSubmit={handleSaveIntegration}>
+          <label className="field-label" htmlFor="public-base-url">
+            URL HTTPS pubblico del backend
+          </label>
+          <input
+            disabled={isSavingIntegration}
+            id="public-base-url"
+            placeholder="https://..."
+            type="url"
+            value={publicBaseUrl}
+            onChange={(event) => setPublicBaseUrl(event.target.value)}
+          />
+
+          <label className="field-label" htmlFor="tool-webhook-secret">
+            Chiave dei tool webhook
+          </label>
+          <input
+            id="tool-webhook-secret"
+            readOnly
+            type="text"
+            value={config.tool_webhook_secret}
+          />
+
+          <label className="field-label" htmlFor="post-call-webhook-secret">
+            Signing secret del post-call webhook
+          </label>
+          <input
+            disabled={isSavingIntegration}
+            id="post-call-webhook-secret"
+            type="text"
+            value={postCallWebhookSecret}
+            onChange={(event) => setPostCallWebhookSecret(event.target.value)}
+          />
+
+          <button
+            className="action-button compact-action"
+            disabled={isSavingIntegration}
+            type="submit"
+          >
+            {isSavingIntegration ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
+            Salva webhook
+          </button>
+        </form>
+
+        <div className="webhook-endpoints">
+          <code>{webhookBase ? `${webhookBase}/api/tools/search-knowledge` : "Configura l'URL pubblico"}</code>
+          <code>{webhookBase ? `${webhookBase}/api/tools/schedule-appointment` : "Configura l'URL pubblico"}</code>
+          <code>{webhookBase ? `${webhookBase}/api/webhooks/elevenlabs/post-call` : "Configura l'URL pubblico"}</code>
+        </div>
+      </div>
+
+      <div className="workspace-panel agent-management-panel">
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Agenti</p>
