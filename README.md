@@ -42,6 +42,15 @@ Avvio:
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
+Il gateway pubblico espone esclusivamente i webhook e deve restare separato dal
+backend applicativo:
+
+```powershell
+uvicorn app.public_gateway:public_app --host 127.0.0.1 --port 8002
+```
+
+Collega il tunnel HTTPS alla porta `8002`, mai direttamente alla porta del backend.
+
 ## Setup frontend
 
 ```powershell
