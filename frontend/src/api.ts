@@ -137,8 +137,34 @@ export type VectorSearchResult = {
   text: string;
 };
 
+export type AuthUser = {
+  id: number;
+  username: string;
+  role: "admin" | "user";
+  can_inbound: boolean;
+  can_outbound: boolean;
+  can_presentation: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type UserCreateInput = {
+  username: string;
+  password: string;
+  role: "admin" | "user";
+  can_inbound: boolean;
+  can_outbound: boolean;
+  can_presentation: boolean;
+};
+
+export type UserUpdateInput = Omit<UserCreateInput, "password"> & {
+  is_active: boolean;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...options?.headers,
@@ -147,8 +173,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
+    if (response.status === 401 && path !== "/api/auth/login") {
+      window.dispatchEvent(new Event("jk-auth-expired"));
+    }
     const body = await response.text();
-    throw new Error(body || `HTTP ${response.status}`);
+    let message = body || `HTTP ${response.status}`;
+    try {
+      const parsed = JSON.parse(body) as { detail?: string };
+      message = parsed.detail || message;
+    } catch {
+      // Keep the raw response when it is not JSON.
+    }
+    throw new Error(message);
   }
 
   return response.json() as Promise<T>;
@@ -221,6 +257,7 @@ export async function uploadVectorStorePdf(file: File, mode: "append" | "replace
     `${API_BASE_URL}/api/vector-store/pdf?mode=${encodeURIComponent(mode)}`,
     {
       method: "POST",
+      credentials: "include",
       body: formData,
     },
   );
@@ -252,8 +289,11 @@ export function searchVectorStore(query: string, limit = 4, source?: string | nu
   );
 }
 
-export function getSignedUrl(agentId?: string | null) {
+type VoiceFlow = "centralino-entrata" | "centralino-uscita" | "presentazione";
+
+export function getSignedUrl(agentId: string | null | undefined, flow: VoiceFlow) {
   const params = new URLSearchParams();
+  params.set("flow", flow);
   if (agentId) {
     params.set("agent_id", agentId);
   }
@@ -263,8 +303,9 @@ export function getSignedUrl(agentId?: string | null) {
   );
 }
 
-export function getConversationToken(agentId?: string | null) {
+export function getConversationToken(agentId: string | null | undefined, flow: VoiceFlow) {
   const params = new URLSearchParams();
+  params.set("flow", flow);
   if (agentId) {
     params.set("agent_id", agentId);
   }
@@ -335,4 +376,55 @@ export function deleteAllOutboundCalls() {
   return request<{ deleted: number }>("/api/outbound-calls", {
     method: "DELETE",
   });
+}
+
+export function login(username: string, password: string) {
+  return request<AuthUser>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function logout() {
+  return request<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+}
+
+export function getCurrentUser() {
+  return request<AuthUser>("/api/auth/me");
+}
+
+export function changePassword(currentPassword: string, newPassword: string) {
+  return request<{ ok: boolean }>("/api/auth/password", {
+    method: "PUT",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
+export function listUsers() {
+  return request<AuthUser[]>("/api/users");
+}
+
+export function createUser(input: UserCreateInput) {
+  return request<AuthUser>("/api/users", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateUser(id: number, input: UserUpdateInput) {
+  return request<AuthUser>(`/api/users/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function resetUserPassword(id: number, password: string) {
+  return request<{ ok: boolean }>(`/api/users/${id}/password`, {
+    method: "PUT",
+    body: JSON.stringify({ password }),
+  });
+}
+
+export function deleteUser(id: number) {
+  return request<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" });
 }

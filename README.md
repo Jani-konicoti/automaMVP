@@ -2,6 +2,20 @@
 
 Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 
+## Accesso iniziale
+
+Al primo avvio viene creato l'amministratore locale:
+
+```text
+username: admin
+password: Cambiami24!
+```
+
+Cambia subito la password dal menu account nella barra laterale. Gli amministratori
+possono creare altri admin e utenti, assegnando separatamente i moduli Centralino
+Entrata, Centralino Uscita e Presentazione. Le password sono salvate come hash
+PBKDF2 e le sessioni browser usano cookie HttpOnly.
+
 ## Cosa fa
 
 - Carichi e indicizzi uno o piu PDF nel vector store locale.
@@ -27,7 +41,10 @@ Compila `backend/.env` solo per impostazioni tecniche locali:
 ```env
 FRONTEND_ORIGIN=http://localhost:5173
 ELEVENLABS_VERIFY_SSL=true
+COOKIE_SECURE=false
 ```
+
+In produzione, con frontend e API pubblicati in HTTPS, imposta `COOKIE_SECURE=true`.
 
 Le credenziali ElevenLabs si configurano dall'app nella pagina `Configurazione`:
 

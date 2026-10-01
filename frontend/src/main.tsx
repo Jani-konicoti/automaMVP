@@ -11,7 +11,9 @@ import {
   BookOpen,
   CalendarClock,
   Database,
+  KeyRound,
   Loader2,
+  LogOut,
   Menu,
   Mic,
   MicOff,
@@ -27,12 +29,14 @@ import {
   Square,
   Trash2,
   UserPlus,
+  UserCog,
   Users,
   X,
 } from "lucide-react";
 import {
   Appointment,
   AppointmentInput,
+  AuthUser,
   ElevenLabsAgent,
   ElevenLabsAgentInput,
   ElevenLabsConfig,
@@ -44,13 +48,19 @@ import {
   VectorSearchResult,
   VectorStoreSource,
   VectorStoreStats,
+  UserCreateInput,
+  UserUpdateInput,
+  changePassword,
   createAppointment,
   createElevenLabsAgent,
   createOutboundContact,
+  createUser,
   deleteAllAppointments,
   deleteAllOutboundCalls,
   deleteElevenLabsAgent,
   deleteOutboundContact,
+  deleteUser,
+  getCurrentUser,
   getConversationToken,
   getElevenLabsConfig,
   getSignedUrl,
@@ -60,6 +70,10 @@ import {
   listElevenLabsPhoneNumbers,
   listOutboundCalls,
   listOutboundContacts,
+  listUsers,
+  login,
+  logout,
+  resetUserPassword,
   saveElevenLabsConfig,
   saveElevenLabsDefaults,
   saveElevenLabsIntegration,
@@ -68,6 +82,7 @@ import {
   startOutboundCall,
   updateElevenLabsAgent,
   updateOutboundContact,
+  updateUser,
   uploadVectorStorePdf,
 } from "./api";
 import "./styles.css";
@@ -77,17 +92,31 @@ type RetrievalQuery = {
   text: string;
 };
 
-type AppView = "demo" | "config";
+type AppView = "demo" | "config" | "users";
 type MainTab = "centralino-entrata" | "centralino-uscita" | "presentazione";
 type VoiceContext = MainTab;
-type NavigationPage = MainTab | "config";
+type NavigationPage = MainTab | "config" | "users";
 type OutboundSection = "operations" | "sources" | "appointments" | "events";
 
 function navigationPageFromHash(): NavigationPage {
   const page = window.location.hash.replace(/^#/, "");
-  return page === "centralino-uscita" || page === "presentazione" || page === "config"
+  return page === "centralino-uscita" || page === "presentazione" || page === "config" || page === "users"
     ? page
     : "centralino-entrata";
+}
+
+function firstAllowedPage(user: AuthUser): NavigationPage {
+  if (user.can_inbound) return "centralino-entrata";
+  if (user.can_outbound) return "centralino-uscita";
+  if (user.can_presentation) return "presentazione";
+  return user.role === "admin" ? "config" : "centralino-entrata";
+}
+
+function canAccessPage(user: AuthUser, page: NavigationPage) {
+  if (page === "centralino-entrata") return user.can_inbound;
+  if (page === "centralino-uscita") return user.can_outbound;
+  if (page === "presentazione") return user.can_presentation;
+  return user.role === "admin";
 }
 
 function preferredAgentId(agents: ElevenLabsAgent[], pattern: RegExp) {
@@ -211,9 +240,12 @@ ${passages}
 `.trim();
 }
 
-function App() {
+function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () => Promise<void> }) {
+  const initialPage = canAccessPage(currentUser, navigationPageFromHash())
+    ? navigationPageFromHash()
+    : firstAllowedPage(currentUser);
   const [appView, setAppView] = useState<AppView>(() =>
-    navigationPageFromHash() === "config" ? "config" : "demo",
+    initialPage === "config" ? "config" : initialPage === "users" ? "users" : "demo",
   );
   const [elevenLabsConfig, setElevenLabsConfig] = useState<ElevenLabsConfig>({
     api_key: "",
@@ -320,15 +352,19 @@ function App() {
   );
 
   useEffect(() => {
-    Promise.all([
-      getElevenLabsConfig(),
-      listAppointments(),
-      getVectorStoreStats(),
-      getVectorStoreSources(),
-      listOutboundContacts(),
-      listOutboundCalls(),
-    ])
-      .then(([configResponse, appointmentRows, stats, sources, contacts, calls]) => {
+    const loadWorkspace = async () => {
+      try {
+        const [configResponse, stats, sources] = await Promise.all([
+          getElevenLabsConfig(),
+          getVectorStoreStats(),
+          getVectorStoreSources(),
+        ]);
+        const appointmentRows = currentUser.can_inbound || currentUser.can_outbound
+          ? await listAppointments()
+          : [];
+        const [contacts, calls] = currentUser.can_outbound
+          ? await Promise.all([listOutboundContacts(), listOutboundCalls()])
+          : [[], []];
         setElevenLabsConfig(configResponse);
         setAppointments(appointmentRows);
         setVectorStats(stats);
@@ -348,15 +384,17 @@ function App() {
             ? configResponse.presentation_source!
             : null,
         );
-      })
-      .catch((err: unknown) => {
+      } catch (err) {
         setError(err instanceof Error ? err.message : "Errore di inizializzazione");
-      })
-      .finally(() => setIsLoading(false));
-  }, []);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    void loadWorkspace();
+  }, [currentUser.can_inbound, currentUser.can_outbound]);
 
   useEffect(() => {
-    if (!elevenLabsConfig.api_key) {
+    if (!elevenLabsConfig.configured || !currentUser.can_outbound) {
       setPhoneNumbers([]);
       return;
     }
@@ -366,19 +404,22 @@ function App() {
         ...current,
       ].slice(0, 12));
     });
-  }, [elevenLabsConfig.api_key, refreshPhoneNumbers]);
+  }, [currentUser.can_outbound, elevenLabsConfig.configured, refreshPhoneNumbers]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== "visible") {
         return;
       }
-      Promise.all([refreshAppointments(), refreshOutboundCalls()]).catch(() => {
+      const refreshes: Promise<unknown>[] = [];
+      if (currentUser.can_inbound || currentUser.can_outbound) refreshes.push(refreshAppointments());
+      if (currentUser.can_outbound) refreshes.push(refreshOutboundCalls());
+      Promise.all(refreshes).catch(() => {
         // A transient polling failure is surfaced by the next explicit action.
       });
     }, 5000);
     return () => window.clearInterval(intervalId);
-  }, [refreshAppointments, refreshOutboundCalls]);
+  }, [currentUser.can_inbound, currentUser.can_outbound, refreshAppointments, refreshOutboundCalls]);
 
   const refreshElevenLabsConfig = useCallback(async () => {
     const config = await getElevenLabsConfig();
@@ -631,6 +672,7 @@ function App() {
     <ConversationProvider {...providerConfig}>
       <Shell
         appView={appView}
+        currentUser={currentUser}
         appointments={appointments}
         outboundCalls={outboundCalls}
         outboundContacts={outboundContacts}
@@ -641,6 +683,7 @@ function App() {
         messages={messages}
         presentationTranscript={presentationTranscript}
         onAppViewChange={setAppView}
+        onLogout={onLogout}
         onClearPresentationTranscript={handleClearPresentationTranscript}
         onCreateElevenLabsAgent={handleCreateElevenLabsAgent}
         onCreateOutboundContact={handleCreateOutboundContact}
@@ -685,6 +728,7 @@ function App() {
 
 type ShellProps = {
   appView: AppView;
+  currentUser: AuthUser;
   appointments: Appointment[];
   outboundCalls: OutboundCall[];
   outboundContacts: OutboundContact[];
@@ -704,6 +748,7 @@ type ShellProps = {
   presentationVectorSource: string | null;
   retrievalQuery: RetrievalQuery | null;
   onAppViewChange: (value: AppView) => void;
+  onLogout: () => Promise<void>;
   onClearPresentationTranscript: () => void;
   onCreateElevenLabsAgent: (input: ElevenLabsAgentInput) => Promise<void>;
   onCreateOutboundContact: (input: OutboundContactInput) => Promise<void>;
@@ -738,6 +783,7 @@ type ShellProps = {
 
 function Shell({
   appView,
+  currentUser,
   appointments,
   outboundCalls,
   outboundContacts,
@@ -757,6 +803,7 @@ function Shell({
   presentationVectorSource,
   retrievalQuery,
   onAppViewChange,
+  onLogout,
   onClearPresentationTranscript,
   onCreateElevenLabsAgent,
   onCreateOutboundContact,
@@ -782,9 +829,10 @@ function Shell({
 }: ShellProps) {
   const [mainTab, setMainTab] = useState<MainTab>(() => {
     const page = navigationPageFromHash();
-    return page === "config" ? "centralino-entrata" : page;
+    return page === "config" || page === "users" ? firstAllowedPage(currentUser) as MainTab : page;
   });
   const [isNavigationOpen, setIsNavigationOpen] = useState(false);
+  const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [inboundAgentId, setInboundAgentId] = useState<string | null>(null);
   const [outboundAgentId, setOutboundAgentId] = useState<string | null>(null);
   const [presentationAgentId, setPresentationAgentId] = useState<string | null>(null);
@@ -821,7 +869,7 @@ function Shell({
     elevenLabsConfig.presentation_agent_id,
   ]);
 
-  const activePage = appView === "config" ? "config" : mainTab;
+  const activePage: NavigationPage = appView === "config" ? "config" : appView === "users" ? "users" : mainTab;
   const pageDetails =
     activePage === "centralino-entrata"
       ? { eyebrow: "Centralino", title: "Chiamate in entrata", description: "Gestione agente, fonti e appuntamenti" }
@@ -829,11 +877,16 @@ function Shell({
         ? { eyebrow: "Centralino", title: "Chiamate in uscita", description: "Contatti, telefonate e trascrizioni" }
         : activePage === "presentazione"
           ? { eyebrow: "Presentazione", title: "Presentazione commerciale", description: "Sessioni guidate sulle fonti selezionate" }
-          : { eyebrow: "Sistema", title: "Configurazione", description: "Agenti, credenziali e integrazioni" };
+          : activePage === "users"
+            ? { eyebrow: "Amministrazione", title: "Utenti e accessi", description: "Ruoli, moduli e credenziali" }
+            : { eyebrow: "Sistema", title: "Configurazione", description: "Agenti, credenziali e integrazioni" };
 
-  const navigateTo = (page: MainTab | "config") => {
+  const navigateTo = (page: NavigationPage) => {
+    if (!canAccessPage(currentUser, page)) return;
     if (page === "config") {
       onAppViewChange("config");
+    } else if (page === "users") {
+      onAppViewChange("users");
     } else {
       setMainTab(page);
       onAppViewChange("demo");
@@ -845,8 +898,14 @@ function Shell({
   useEffect(() => {
     const handleHashChange = () => {
       const page = navigationPageFromHash();
+      if (!canAccessPage(currentUser, page)) {
+        navigateTo(firstAllowedPage(currentUser));
+        return;
+      }
       if (page === "config") {
         onAppViewChange("config");
+      } else if (page === "users") {
+        onAppViewChange("users");
       } else {
         setMainTab(page);
         onAppViewChange("demo");
@@ -855,7 +914,7 @@ function Shell({
     };
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
-  }, [onAppViewChange]);
+  }, [currentUser, onAppViewChange]);
 
   return (
     <main className="app-shell">
@@ -878,45 +937,31 @@ function Shell({
 
         <nav className="sidebar-navigation" aria-label="Navigazione principale">
           <p>Operatività</p>
-          <button
-            className={activePage === "centralino-entrata" ? "active" : ""}
-            type="button"
-            onClick={() => navigateTo("centralino-entrata")}
-          >
-            <PhoneIncoming size={18} />
-            <span>Centralino Entrata</span>
-          </button>
-          <button
-            className={activePage === "centralino-uscita" ? "active" : ""}
-            type="button"
-            onClick={() => navigateTo("centralino-uscita")}
-          >
-            <PhoneOutgoing size={18} />
-            <span>Centralino Uscita</span>
-          </button>
-          <button
-            className={activePage === "presentazione" ? "active" : ""}
-            type="button"
-            onClick={() => navigateTo("presentazione")}
-          >
-            <Presentation size={18} />
-            <span>Presentazione</span>
-          </button>
+          {currentUser.can_inbound && <button className={activePage === "centralino-entrata" ? "active" : ""} type="button" onClick={() => navigateTo("centralino-entrata")}>
+            <PhoneIncoming size={18} /><span>Centralino Entrata</span>
+          </button>}
+          {currentUser.can_outbound && <button className={activePage === "centralino-uscita" ? "active" : ""} type="button" onClick={() => navigateTo("centralino-uscita")}>
+            <PhoneOutgoing size={18} /><span>Centralino Uscita</span>
+          </button>}
+          {currentUser.can_presentation && <button className={activePage === "presentazione" ? "active" : ""} type="button" onClick={() => navigateTo("presentazione")}>
+            <Presentation size={18} /><span>Presentazione</span>
+          </button>}
 
-          <p>Amministrazione</p>
-          <button
-            className={activePage === "config" ? "active" : ""}
-            type="button"
-            onClick={() => navigateTo("config")}
-          >
-            <Settings size={18} />
-            <span>Configurazione</span>
-          </button>
+          {currentUser.role === "admin" && <><p>Amministrazione</p>
+            <button className={activePage === "users" ? "active" : ""} type="button" onClick={() => navigateTo("users")}>
+              <UserCog size={18} /><span>Utenti</span>
+            </button>
+            <button className={activePage === "config" ? "active" : ""} type="button" onClick={() => navigateTo("config")}>
+              <Settings size={18} /><span>Configurazione</span>
+            </button></>}
         </nav>
 
         <div className="sidebar-footer">
-          <span>Stato piattaforma</span>
-          <StatusPill />
+          <div className="sidebar-user"><strong>{currentUser.username}</strong><span>{currentUser.role === "admin" ? "Amministratore" : "Utente"}</span></div>
+          <div className="sidebar-account-actions">
+            <button title="Cambia password" type="button" onClick={() => setIsPasswordModalOpen(true)}><KeyRound size={17} /></button>
+            <button title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button>
+          </div>
         </div>
       </aside>
 
@@ -973,6 +1018,8 @@ function Shell({
             onSetError={onSetError}
             onUpdateAgent={onUpdateElevenLabsAgent}
           />
+        ) : appView === "users" ? (
+          <UsersPage currentUser={currentUser} onSetError={onSetError} />
         ) : (
           <section className="main-workspace">
             {mainTab === "centralino-entrata" ? (
@@ -1049,8 +1096,198 @@ function Shell({
           </section>
         )}
       </div>
+      <PasswordModal isOpen={isPasswordModalOpen} onClose={() => setIsPasswordModalOpen(false)} onSetError={onSetError} />
     </main>
   );
+}
+
+function PasswordModal({
+  isOpen,
+  onClose,
+  onSetError,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSetError: (value: string | null) => void;
+}) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) {
+      onSetError("Le nuove password non coincidono");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      onClose();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Cambio password fallito");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return <Modal eyebrow="Account" icon={<KeyRound size={20} />} isOpen={isOpen} onClose={isSaving ? () => undefined : onClose} title="Cambia password">
+    <form onSubmit={submit}>
+      <div className="modal-body modal-form">
+        <label><span>Password attuale</span><input autoFocus type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
+        <label><span>Nuova password</span><input minLength={8} type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
+        <label><span>Conferma nuova password</span><input minLength={8} type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label>
+      </div>
+      <footer className="modal-actions">
+        <button className="secondary-button" disabled={isSaving} type="button" onClick={onClose}>Annulla</button>
+        <button className="primary-button" disabled={isSaving || !currentPassword || newPassword.length < 8 || !confirmPassword} type="submit">{isSaving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}Aggiorna</button>
+      </footer>
+    </form>
+  </Modal>;
+}
+
+const emptyUserInput: UserCreateInput = {
+  username: "",
+  password: "",
+  role: "user",
+  can_inbound: true,
+  can_outbound: false,
+  can_presentation: false,
+};
+
+function UsersPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetError: (value: string | null) => void }) {
+  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [editingUser, setEditingUser] = useState<AuthUser | null>(null);
+  const [form, setForm] = useState<UserCreateInput>(emptyUserInput);
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const [passwordUser, setPasswordUser] = useState<AuthUser | null>(null);
+  const [replacementPassword, setReplacementPassword] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<AuthUser | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+
+  const refresh = useCallback(async () => setUsers(await listUsers()), []);
+  useEffect(() => { void refresh().catch((err) => onSetError(err instanceof Error ? err.message : "Caricamento utenti fallito")); }, [onSetError, refresh]);
+
+  const openCreate = () => {
+    setEditingUser(null);
+    setForm(emptyUserInput);
+    setIsEditorOpen(true);
+  };
+  const openEdit = (user: AuthUser) => {
+    setEditingUser(user);
+    setForm({
+      username: user.username,
+      password: "",
+      role: user.role,
+      can_inbound: user.can_inbound,
+      can_outbound: user.can_outbound,
+      can_presentation: user.can_presentation,
+    });
+    setIsEditorOpen(true);
+  };
+  const submitUser = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setIsBusy(true);
+    try {
+      if (editingUser) {
+        const input: UserUpdateInput = {
+          username: form.username,
+          role: form.role,
+          can_inbound: form.can_inbound,
+          can_outbound: form.can_outbound,
+          can_presentation: form.can_presentation,
+          is_active: editingUser.is_active,
+        };
+        await updateUser(editingUser.id, input);
+      } else {
+        await createUser(form);
+      }
+      await refresh();
+      setIsEditorOpen(false);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Salvataggio utente fallito");
+    } finally {
+      setIsBusy(false);
+    }
+  };
+  const toggleActive = async (user: AuthUser) => {
+    setIsBusy(true);
+    try {
+      await updateUser(user.id, { username: user.username, role: user.role, can_inbound: user.can_inbound, can_outbound: user.can_outbound, can_presentation: user.can_presentation, is_active: !user.is_active });
+      await refresh();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Aggiornamento utente fallito");
+    } finally { setIsBusy(false); }
+  };
+  const submitReset = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!passwordUser) return;
+    setIsBusy(true);
+    try {
+      await resetUserPassword(passwordUser.id, replacementPassword);
+      setPasswordUser(null);
+      setReplacementPassword("");
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Reset password fallito");
+    } finally { setIsBusy(false); }
+  };
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setIsBusy(true);
+    try {
+      await deleteUser(deleteTarget.id);
+      await refresh();
+      setDeleteTarget(null);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Eliminazione utente fallita");
+    } finally { setIsBusy(false); }
+  };
+
+  return <section className="users-workspace">
+    <div className="workspace-panel users-panel">
+      <div className="panel-heading"><div><p className="eyebrow">Accessi</p><h2>Utenti</h2></div><button className="small-button primary" type="button" onClick={openCreate}><UserPlus size={16} />Nuovo utente</button></div>
+      <div className="users-list">
+        {users.map((user) => <article className={`user-row ${user.is_active ? "" : "inactive"}`} key={user.id}>
+          <div className="user-identity"><span className="user-avatar">{user.username.slice(0, 2).toUpperCase()}</span><div><strong>{user.username}</strong><span>{user.role === "admin" ? "Amministratore" : "Utente"}</span></div></div>
+          <div className="permission-tags">
+            {user.can_inbound && <span>Entrata</span>}{user.can_outbound && <span>Uscita</span>}{user.can_presentation && <span>Presentazione</span>}
+            {!user.is_active && <span className="disabled-tag">Disattivato</span>}
+          </div>
+          <div className="user-actions">
+            <button className="icon-button" title="Modifica" type="button" onClick={() => openEdit(user)}><Settings size={16} /></button>
+            <button className="icon-button" disabled={user.id === currentUser.id} title="Reset password" type="button" onClick={() => { setPasswordUser(user); setReplacementPassword(""); }}><KeyRound size={16} /></button>
+            <button className="small-button" disabled={user.id === currentUser.id || isBusy} type="button" onClick={() => void toggleActive(user)}>{user.is_active ? "Disattiva" : "Attiva"}</button>
+            <button className="icon-button danger" disabled={user.id === currentUser.id} title="Elimina" type="button" onClick={() => setDeleteTarget(user)}><Trash2 size={16} /></button>
+          </div>
+        </article>)}
+      </div>
+    </div>
+
+    <Modal eyebrow="Amministrazione" icon={<UserCog size={20} />} isOpen={isEditorOpen} onClose={isBusy ? () => undefined : () => setIsEditorOpen(false)} title={editingUser ? "Modifica utente" : "Nuovo utente"}>
+      <form onSubmit={submitUser}>
+        <div className="modal-body modal-form">
+          <label><span>Username</span><input autoFocus value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
+          {!editingUser && <label><span>Password iniziale</span><input minLength={8} type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>}
+          <label><span>Ruolo</span><select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value as "admin" | "user" })}><option value="user">Utente</option><option value="admin">Amministratore</option></select></label>
+          <fieldset className="permission-fieldset" disabled={form.role === "admin"}><legend>Moduli visibili</legend>
+            <label className="permission-check"><input type="checkbox" checked={form.can_inbound || form.role === "admin"} onChange={(event) => setForm({ ...form, can_inbound: event.target.checked })} /><span>Centralino Entrata</span></label>
+            <label className="permission-check"><input type="checkbox" checked={form.can_outbound || form.role === "admin"} onChange={(event) => setForm({ ...form, can_outbound: event.target.checked })} /><span>Centralino Uscita</span></label>
+            <label className="permission-check"><input type="checkbox" checked={form.can_presentation || form.role === "admin"} onChange={(event) => setForm({ ...form, can_presentation: event.target.checked })} /><span>Presentazione</span></label>
+          </fieldset>
+        </div>
+        <footer className="modal-actions"><button className="secondary-button" disabled={isBusy} type="button" onClick={() => setIsEditorOpen(false)}>Annulla</button><button className="primary-button" disabled={isBusy || form.username.trim().length < 3 || (!editingUser && form.password.length < 8) || (form.role === "user" && !form.can_inbound && !form.can_outbound && !form.can_presentation)} type="submit">{isBusy ? <Loader2 className="spin" size={16} /> : <Save size={16} />}Salva</button></footer>
+      </form>
+    </Modal>
+
+    <Modal eyebrow="Credenziali" icon={<KeyRound size={20} />} isOpen={Boolean(passwordUser)} onClose={isBusy ? () => undefined : () => setPasswordUser(null)} title={`Reset password${passwordUser ? ` · ${passwordUser.username}` : ""}`}>
+      <form onSubmit={submitReset}><div className="modal-body modal-form"><label><span>Nuova password</span><input autoFocus minLength={8} type="password" value={replacementPassword} onChange={(event) => setReplacementPassword(event.target.value)} /></label></div><footer className="modal-actions"><button className="secondary-button" type="button" onClick={() => setPasswordUser(null)}>Annulla</button><button className="primary-button" disabled={isBusy || replacementPassword.length < 8} type="submit">Imposta password</button></footer></form>
+    </Modal>
+    <ConfirmDialog confirmLabel="Elimina utente" description={`L'account ${deleteTarget?.username ?? ""} e tutte le sue sessioni verranno eliminati.`} isBusy={isBusy} isOpen={Boolean(deleteTarget)} onClose={() => setDeleteTarget(null)} onConfirm={() => void confirmDelete()} title="Eliminare questo utente?" />
+  </section>;
 }
 
 function CentralinoPage({
@@ -2648,14 +2885,14 @@ function VoicePanel({
       onVoiceContextChange(contextMode);
       onSetError(null);
       if (connectionMode === "webrtc") {
-        const response = await getConversationToken(effectiveAgentId);
+        const response = await getConversationToken(effectiveAgentId, contextMode);
         await startSession({
           conversationToken: response.token,
           connectionType: "webrtc",
           textOnly: false,
         });
       } else {
-        const response = await getSignedUrl(effectiveAgentId);
+        const response = await getSignedUrl(effectiveAgentId, contextMode);
         await startSession({
           signedUrl: response.signed_url,
           connectionType: "websocket",
@@ -2872,8 +3109,61 @@ function DebugPanel({ messages }: { messages: string[] }) {
   );
 }
 
+function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      onAuthenticated(await login(username, password));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Accesso non riuscito");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return <main className="login-page">
+    <section className="login-panel">
+      <header className="login-brand"><span className="brand-mark">JK</span><div><strong>JK Automa</strong><span>Voice operations</span></div></header>
+      <div className="login-heading"><p className="eyebrow">Area riservata</p><h1>Accedi</h1><p>Inserisci le credenziali assegnate dall’amministratore.</p></div>
+      {error && <div className="login-error">{error}</div>}
+      <form className="login-form" onSubmit={submit}>
+        <label><span>Username</span><input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
+        <label><span>Password</span><input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <button className="primary-button" disabled={isSubmitting || !username.trim() || !password} type="submit">{isSubmitting ? <Loader2 className="spin" size={17} /> : <LogOut size={17} />}Accedi</button>
+      </form>
+    </section>
+  </main>;
+}
+
+function RootApp() {
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [isCheckingSession, setIsCheckingSession] = useState(true);
+
+  useEffect(() => {
+    getCurrentUser().then(setCurrentUser).catch(() => setCurrentUser(null)).finally(() => setIsCheckingSession(false));
+    const clearSession = () => setCurrentUser(null);
+    window.addEventListener("jk-auth-expired", clearSession);
+    return () => window.removeEventListener("jk-auth-expired", clearSession);
+  }, []);
+
+  if (isCheckingSession) {
+    return <main className="login-page"><Loader2 className="spin" size={28} /></main>;
+  }
+  if (!currentUser) {
+    return <LoginScreen onAuthenticated={setCurrentUser} />;
+  }
+  return <App currentUser={currentUser} onLogout={async () => { await logout(); setCurrentUser(null); }} />;
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <RootApp />
   </React.StrictMode>,
 );

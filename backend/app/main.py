@@ -17,8 +17,9 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pypdf import PdfReader
 from pydantic import BaseModel, Field
 
@@ -37,6 +38,10 @@ ELEVENLABS_VERIFY_SSL = os.getenv("ELEVENLABS_VERIFY_SSL", "true").lower() not i
     "false",
     "no",
 }
+SESSION_COOKIE = "jk_automa_session"
+SESSION_TTL_SECONDS = 12 * 60 * 60
+PASSWORD_ITERATIONS = 310_000
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
 DEV_ORIGINS = {
     FRONTEND_ORIGIN,
     "http://localhost:5173",
@@ -226,6 +231,50 @@ class ToolKnowledgeIn(BaseModel):
     knowledge_source: str | None = Field(default=None, max_length=500)
 
 
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserCreateIn(BaseModel):
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=8, max_length=128)
+    role: str = Field(pattern="^(admin|user)$")
+    can_inbound: bool = False
+    can_outbound: bool = False
+    can_presentation: bool = False
+
+
+class UserUpdateIn(BaseModel):
+    username: str = Field(min_length=3, max_length=80)
+    role: str = Field(pattern="^(admin|user)$")
+    can_inbound: bool = False
+    can_outbound: bool = False
+    can_presentation: bool = False
+    is_active: bool = True
+
+
+class AdminPasswordResetIn(BaseModel):
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class AuthUser(BaseModel):
+    id: int
+    username: str
+    role: str
+    can_inbound: bool
+    can_outbound: bool
+    can_presentation: bool
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
 TOKEN_RE = re.compile(r"[a-zA-ZÀ-ÿ0-9]{2,}")
 STOPWORDS = {
     "alla",
@@ -273,6 +322,45 @@ def split_legacy_knowledge(text: str) -> tuple[str, str]:
         "Rispondi in italiano, in modo naturale, breve e professionale.",
         text.strip(),
     )
+
+
+def normalize_username(value: str) -> str:
+    username = value.strip().lower()
+    if not re.fullmatch(r"[a-z0-9._-]{3,80}", username):
+        raise HTTPException(
+            status_code=400,
+            detail="Lo username può contenere lettere, numeri, punto, trattino e underscore.",
+        )
+    return username
+
+
+def hash_password(password: str, salt: bytes | None = None) -> str:
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="La password deve avere almeno 8 caratteri")
+    password_salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        password_salt,
+        PASSWORD_ITERATIONS,
+    )
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${password_salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt_hex, expected_hex = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            int(iterations),
+        )
+        return hmac.compare_digest(digest.hex(), expected_hex)
+    except (TypeError, ValueError):
+        return False
 
 
 def ensure_storage() -> None:
@@ -434,6 +522,39 @@ def ensure_storage() -> None:
             ON outbound_calls (created_at DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+                can_inbound INTEGER NOT NULL DEFAULT 0,
+                can_outbound INTEGER NOT NULL DEFAULT 0,
+                can_presentation INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
+            ON user_sessions (user_id)
+            """
+        )
         behaviors_count = conn.execute("SELECT COUNT(*) FROM bot_behaviors").fetchone()[0]
         if behaviors_count == 0:
             now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -446,6 +567,18 @@ def ensure_storage() -> None:
                 ("Predefinito", content, now, now),
             )
         now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        users_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if users_count == 0:
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, can_inbound, can_outbound,
+                    can_presentation, is_active, created_at, updated_at
+                ) VALUES (?, ?, 'admin', 1, 1, 1, 1, ?, ?)
+                """,
+                ("admin", hash_password("Cambiami24!"), now, now),
+            )
+        conn.execute("DELETE FROM user_sessions WHERE expires_at <= ?", (int(time.time()),))
         config_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_config").fetchone()[0]
         if config_count == 0:
             conn.execute(
@@ -481,6 +614,116 @@ def ensure_storage() -> None:
                 ("Agente principale", env_agent_id, now, now),
             )
         conn.commit()
+
+
+def row_to_auth_user(row: sqlite3.Row) -> AuthUser:
+    is_admin = row["role"] == "admin"
+    return AuthUser(
+        id=row["id"],
+        username=row["username"],
+        role=row["role"],
+        can_inbound=is_admin or bool(row["can_inbound"]),
+        can_outbound=is_admin or bool(row["can_outbound"]),
+        can_presentation=is_admin or bool(row["can_presentation"]),
+        is_active=bool(row["is_active"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def user_from_session(token: str | None) -> AuthUser | None:
+    if not token:
+        return None
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT u.*
+            FROM user_sessions s
+            JOIN users u ON u.id = s.user_id
+            WHERE s.token_hash = ? AND s.expires_at > ? AND u.is_active = 1
+            """,
+            (session_token_hash(token), int(time.time())),
+        ).fetchone()
+    return row_to_auth_user(row) if row else None
+
+
+def request_user(request: Request) -> AuthUser:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Autenticazione richiesta")
+    return user
+
+
+def ensure_admin(user: AuthUser) -> None:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Permessi amministratore richiesti")
+
+
+def api_error(request: Request, status_code: int, detail: str) -> JSONResponse:
+    response = JSONResponse(status_code=status_code, content={"detail": detail})
+    origin = request.headers.get("origin")
+    if origin in DEV_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+def permission_denied(request: Request) -> JSONResponse:
+    return api_error(request, 403, "Modulo non autorizzato")
+
+
+@app.middleware("http")
+async def authenticate_request(request: Request, call_next):
+    path = request.url.path
+    if request.method == "OPTIONS" or path in {"/api/health", "/api/auth/login"}:
+        return await call_next(request)
+    if path.startswith("/api/tools/") or path.startswith("/api/webhooks/"):
+        return await call_next(request)
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    user = user_from_session(request.cookies.get(SESSION_COOKIE))
+    if not user:
+        return api_error(request, 401, "Autenticazione richiesta")
+    request.state.user = user
+
+    admin_only = (
+        path.startswith("/api/users")
+        or path.startswith("/api/elevenlabs/agents")
+        or (
+            path.startswith("/api/elevenlabs/config")
+            and path != "/api/elevenlabs/config/source"
+            and request.method != "GET"
+        )
+    )
+    if admin_only and user.role != "admin":
+        return api_error(request, 403, "Permessi amministratore richiesti")
+
+    if (
+        path.startswith("/api/outbound-")
+        or path == "/api/elevenlabs/phone-numbers"
+    ) and not user.can_outbound:
+        return permission_denied(request)
+    if path.startswith("/api/appointments") and not (user.can_inbound or user.can_outbound):
+        return permission_denied(request)
+    if path in {"/api/elevenlabs/signed-url", "/api/elevenlabs/conversation-token"}:
+        flow = request.query_params.get("flow")
+        flow_allowed = {
+            "centralino-entrata": user.can_inbound,
+            "centralino-uscita": user.can_outbound,
+            "presentazione": user.can_presentation,
+        }
+        if not flow or not flow_allowed.get(flow, False):
+            return permission_denied(request)
+
+    return await call_next(request)
 
 
 def row_to_bot_behavior(row: sqlite3.Row) -> BotBehavior:
@@ -985,6 +1228,199 @@ def transcript_to_text(transcript: Any) -> str:
     return "\n\n".join(lines)
 
 
+@app.post("/api/auth/login", response_model=AuthUser)
+def login(payload: LoginIn, response: Response) -> AuthUser:
+    ensure_storage()
+    username = payload.username.strip().lower()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        if not row or not row["is_active"] or not verify_password(payload.password, row["password_hash"]):
+            raise HTTPException(status_code=401, detail="Credenziali non valide")
+        token = secrets.token_urlsafe(48)
+        conn.execute(
+            """
+            INSERT INTO user_sessions (token_hash, user_id, expires_at, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                session_token_hash(token),
+                row["id"],
+                int(time.time()) + SESSION_TTL_SECONDS,
+                utc_now(),
+            ),
+        )
+        conn.commit()
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+    return row_to_auth_user(row)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response) -> dict[str, bool]:
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM user_sessions WHERE token_hash = ?", (session_token_hash(token),))
+            conn.commit()
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me", response_model=AuthUser)
+def get_current_user(request: Request) -> AuthUser:
+    return request_user(request)
+
+
+@app.put("/api/auth/password")
+def change_password(payload: PasswordChangeIn, request: Request) -> dict[str, bool]:
+    user = request_user(request)
+    token = request.cookies.get(SESSION_COOKIE, "")
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (user.id,)).fetchone()
+        if not row or not verify_password(payload.current_password, row[0]):
+            raise HTTPException(status_code=400, detail="Password attuale non corretta")
+        conn.execute(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+            (hash_password(payload.new_password), utc_now(), user.id),
+        )
+        conn.execute(
+            "DELETE FROM user_sessions WHERE user_id = ? AND token_hash <> ?",
+            (user.id, session_token_hash(token)),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.get("/api/users", response_model=list[AuthUser])
+def list_users(request: Request) -> list[AuthUser]:
+    ensure_admin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM users ORDER BY role, username").fetchall()
+    return [row_to_auth_user(row) for row in rows]
+
+
+@app.post("/api/users", response_model=AuthUser)
+def create_user(payload: UserCreateIn, request: Request) -> AuthUser:
+    ensure_admin(request_user(request))
+    username = normalize_username(payload.username)
+    if payload.role == "user" and not (
+        payload.can_inbound or payload.can_outbound or payload.can_presentation
+    ):
+        raise HTTPException(status_code=400, detail="Assegna almeno un modulo all'utente")
+    now = utc_now()
+    permissions = (True, True, True) if payload.role == "admin" else (
+        payload.can_inbound,
+        payload.can_outbound,
+        payload.can_presentation,
+    )
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, can_inbound, can_outbound,
+                    can_presentation, is_active, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    username,
+                    hash_password(payload.password),
+                    payload.role,
+                    *permissions,
+                    now,
+                    now,
+                ),
+            )
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Username già esistente") from exc
+    return row_to_auth_user(row)
+
+
+@app.put("/api/users/{user_id}", response_model=AuthUser)
+def update_user(user_id: int, payload: UserUpdateIn, request: Request) -> AuthUser:
+    actor = request_user(request)
+    ensure_admin(actor)
+    username = normalize_username(payload.username)
+    if actor.id == user_id and (payload.role != "admin" or not payload.is_active):
+        raise HTTPException(status_code=400, detail="Non puoi rimuovere il tuo accesso amministratore")
+    if payload.role == "user" and not (
+        payload.can_inbound or payload.can_outbound or payload.can_presentation
+    ):
+        raise HTTPException(status_code=400, detail="Assegna almeno un modulo all'utente")
+    permissions = (True, True, True) if payload.role == "admin" else (
+        payload.can_inbound,
+        payload.can_outbound,
+        payload.can_presentation,
+    )
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE users
+                SET username = ?, role = ?, can_inbound = ?, can_outbound = ?,
+                    can_presentation = ?, is_active = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (username, payload.role, *permissions, payload.is_active, utc_now(), user_id),
+            )
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Utente non trovato")
+            if not payload.is_active:
+                conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Username già esistente") from exc
+    return row_to_auth_user(row)
+
+
+@app.put("/api/users/{user_id}/password")
+def reset_user_password(
+    user_id: int,
+    payload: AdminPasswordResetIn,
+    request: Request,
+) -> dict[str, bool]:
+    ensure_admin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+            (hash_password(payload.password), utc_now(), user_id),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+        conn.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, request: Request) -> dict[str, bool]:
+    actor = request_user(request)
+    ensure_admin(actor)
+    if actor.id == user_id:
+        raise HTTPException(status_code=400, detail="Non puoi eliminare il tuo account")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+        cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Utente non trovato")
+        conn.commit()
+    return {"ok": True}
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     ensure_storage()
@@ -1216,9 +1652,22 @@ def search_vector_store(
     return VectorSearchResponse(results=search_vector_chunks(q, limit, source))
 
 
+def visible_elevenlabs_config(user: AuthUser) -> ElevenLabsConfig:
+    config = get_elevenlabs_config_payload()
+    if user.role != "admin":
+        return config.model_copy(
+            update={
+                "api_key": "",
+                "tool_webhook_secret": "",
+                "post_call_webhook_secret": "",
+            }
+        )
+    return config
+
+
 @app.get("/api/elevenlabs/config", response_model=ElevenLabsConfig)
-def get_elevenlabs_config() -> ElevenLabsConfig:
-    return get_elevenlabs_config_payload()
+def get_elevenlabs_config(request: Request) -> ElevenLabsConfig:
+    return visible_elevenlabs_config(request_user(request))
 
 
 @app.put("/api/elevenlabs/config", response_model=ElevenLabsConfig)
@@ -1306,8 +1755,16 @@ def save_elevenlabs_integration(payload: ElevenLabsIntegrationIn) -> ElevenLabsC
 
 
 @app.put("/api/elevenlabs/config/source", response_model=ElevenLabsConfig)
-def save_flow_source(payload: FlowSourceIn) -> ElevenLabsConfig:
+def save_flow_source(payload: FlowSourceIn, request: Request) -> ElevenLabsConfig:
     ensure_storage()
+    user = request_user(request)
+    allowed = {
+        "centralino-entrata": user.can_inbound,
+        "centralino-uscita": user.can_outbound,
+        "presentazione": user.can_presentation,
+    }
+    if not allowed[payload.flow]:
+        raise HTTPException(status_code=403, detail="Modulo non autorizzato")
     source = ensure_known_source(payload.source)
     column_by_flow = {
         "centralino-entrata": "inbound_source",
@@ -1321,7 +1778,7 @@ def save_flow_source(payload: FlowSourceIn) -> ElevenLabsConfig:
             (source, utc_now()),
         )
         conn.commit()
-    return get_elevenlabs_config_payload()
+    return visible_elevenlabs_config(user)
 
 
 @app.post("/api/elevenlabs/agents", response_model=ElevenLabsAgent)
