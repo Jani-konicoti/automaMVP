@@ -920,10 +920,10 @@ function Shell({
     <main className="app-shell">
       <aside className={`app-sidebar ${isNavigationOpen ? "open" : ""}`}>
         <div className="sidebar-brand">
-          <span className="brand-mark">JK</span>
+          <img className="sidebar-brand-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
           <div>
-            <strong>JK Automa</strong>
-            <span>Voice operations</span>
+            <strong>CP DEMO</strong>
+            <span>Centro Paghe</span>
           </div>
           <button
             className="sidebar-close"
@@ -3129,9 +3129,13 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) =>
   };
 
   return <main className="login-page">
+    <section className="login-visual">
+      <img className="login-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
+      <h1>CP DEMO</h1>
+      <p>La piattaforma vocale per gestire centralino, chiamate commerciali e presentazioni assistite.</p>
+    </section>
     <section className="login-panel">
-      <header className="login-brand"><span className="brand-mark">JK</span><div><strong>JK Automa</strong><span>Voice operations</span></div></header>
-      <div className="login-heading"><p className="eyebrow">Area riservata</p><h1>Accedi</h1><p>Inserisci le credenziali assegnate dall’amministratore.</p></div>
+      <div className="login-heading"><p className="eyebrow">Area riservata</p><h2>Accesso</h2><p>Inserisci le credenziali assegnate dall’amministratore.</p></div>
       {error && <div className="login-error">{error}</div>}
       <form className="login-form" onSubmit={submit}>
         <label><span>Username</span><input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>

@@ -38,7 +38,7 @@ ELEVENLABS_VERIFY_SSL = os.getenv("ELEVENLABS_VERIFY_SSL", "true").lower() not i
     "false",
     "no",
 }
-SESSION_COOKIE = "jk_automa_session"
+SESSION_COOKIE = "cp_demo_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
@@ -50,7 +50,7 @@ DEV_ORIGINS = {
     "http://127.0.0.1:5174",
 }
 
-app = FastAPI(title="JK Automa")
+app = FastAPI(title="CP DEMO")
 
 app.add_middleware(
     CORSMiddleware,
