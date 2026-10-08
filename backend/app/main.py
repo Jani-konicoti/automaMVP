@@ -42,6 +42,8 @@ SESSION_COOKIE = "cp_demo_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+INITIAL_ADMIN_PASSWORD = os.getenv("INITIAL_ADMIN_PASSWORD", "Cambiami24!")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 OUTBOUND_RECONCILE_CHECKS: dict[int, float] = {}
 DEV_ORIGINS = {
     FRONTEND_ORIGIN,
@@ -665,7 +667,7 @@ def ensure_storage() -> None:
                     can_presentation, is_active, created_at, updated_at
                 ) VALUES (?, ?, 'admin', 1, 1, 1, 1, ?, ?)
                 """,
-                ("admin", hash_password("Cambiami24!"), now, now),
+                ("admin", hash_password(INITIAL_ADMIN_PASSWORD), now, now),
             )
         conn.execute("DELETE FROM user_sessions WHERE expires_at <= ?", (int(time.time()),))
         config_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_config").fetchone()[0]
@@ -673,13 +675,16 @@ def ensure_storage() -> None:
             conn.execute(
                 """
                 INSERT INTO elevenlabs_config (
-                    id, api_key, tool_webhook_secret, updated_at
+                    id, api_key, public_base_url, tool_webhook_secret,
+                    post_call_webhook_secret, updated_at
                 )
-                VALUES (1, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?)
                 """,
                 (
                     os.getenv("ELEVENLABS_API_KEY", "").strip(),
+                    PUBLIC_BASE_URL,
                     secrets.token_urlsafe(32),
+                    os.getenv("POST_CALL_WEBHOOK_SECRET", "").strip(),
                     now,
                 ),
             )
@@ -692,6 +697,15 @@ def ensure_storage() -> None:
                 """,
                 (secrets.token_urlsafe(32),),
             )
+            if PUBLIC_BASE_URL:
+                conn.execute(
+                    """
+                    UPDATE elevenlabs_config
+                    SET public_base_url = ?, updated_at = ?
+                    WHERE id = 1 AND public_base_url != ?
+                    """,
+                    (PUBLIC_BASE_URL, now, PUBLIC_BASE_URL),
+                )
         agents_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_agents").fetchone()[0]
         env_agent_id = os.getenv("ELEVENLABS_AGENT_ID", "").strip()
         if agents_count == 0 and env_agent_id:

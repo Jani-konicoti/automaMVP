@@ -1,0 +1,58 @@
+name: cp-demo
+
+services:
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      FRONTEND_ORIGIN: ${APP_URL:-http://localhost:8080}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ELEVENLABS_VERIFY_SSL: ${ELEVENLABS_VERIFY_SSL:-true}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-Cambiami24!}
+      PUBLIC_BASE_URL: ${APP_URL:-http://localhost:8080}
+      POST_CALL_WEBHOOK_SECRET: ${POST_CALL_WEBHOOK_SECRET:-}
+    volumes:
+      - ./server-data:/app/data
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  gateway:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["uvicorn", "app.public_gateway:public_app", "--host", "0.0.0.0", "--port", "8002", "--workers", "1"]
+    environment:
+      INTERNAL_API_URL: http://backend:8001
+    depends_on:
+      backend:
+        condition: service_healthy
+    expose:
+      - "8002"
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:80"
+
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      frontend:
+        condition: service_started

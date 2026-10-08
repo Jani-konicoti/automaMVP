@@ -120,3 +120,114 @@ Webhook `searchKnowledge`:
 
 In `Developers > Webhooks` configura anche il post-call webhook mostrato nell'app,
 abilita l'evento di trascrizione e salva nell'app il signing secret generato da ElevenLabs.
+
+## Deploy Docker in produzione
+
+Il deployment usa quattro servizi:
+
+- `frontend`: Nginx serve React e costituisce l'unico ingresso pubblico;
+- `backend`: FastAPI applicativo, non esposto direttamente;
+- `gateway`: espone internamente soltanto tool e webhook ElevenLabs;
+- `cloudflared`: opzionale, attivo solo con il profilo `tunnel`.
+
+SQLite, PDF, configurazione e utenti sono persistiti nella cartella host
+`server-data/`, esclusa da Git. Il backend usa un solo worker per evitare accessi
+concorrenti non necessari al database SQLite.
+
+### Primo deploy
+
+Sul server Linux con Git, Docker Engine e Docker Compose plugin installati:
+
+```bash
+git clone https://github.com/Jani-konicoti/automaMVP.git
+cd automaMVP
+cp .env.production.example .env.production
+nano .env.production
+docker compose --env-file .env.production up -d --build
+```
+
+Imposta almeno:
+
+```env
+APP_URL=https://demo.example.it
+APP_BIND_ADDRESS=127.0.0.1
+APP_PORT=8080
+COOKIE_SECURE=true
+INITIAL_ADMIN_PASSWORD=una-password-iniziale-lunga
+```
+
+`INITIAL_ADMIN_PASSWORD` viene usata solo se il database non contiene ancora
+utenti. Accedi come `admin` e cambiala comunque dall'applicazione.
+
+Per trasferire sul server configurazione, utenti, PDF indicizzati, appuntamenti e
+cronologia già presenti in locale, copia il contenuto di `backend/data/` nella
+cartella `server-data/` del server prima del primo `docker compose up`. Se vuoi
+partire da un'installazione pulita, lascia `server-data/` vuota.
+
+Se il dominio viene terminato da Nginx, Caddy, Traefik o un load balancer esterno,
+inoltra il traffico verso `http://127.0.0.1:8080`. Se vuoi raggiungere direttamente
+la porta dall'esterno, imposta `APP_BIND_ADDRESS=0.0.0.0` e proteggila con il
+firewall. Non pubblicare direttamente le porte 8001 e 8002.
+
+### Cloudflare Tunnel gestito
+
+Per sostituire il quick tunnel provvisorio:
+
+1. In Cloudflare Zero Trust crea un tunnel permanente.
+2. Aggiungi un Public Hostname per `demo.example.it`.
+3. Come servizio del tunnel usa `http://frontend:80`.
+4. Copia il token del tunnel in `.env.production`:
+
+```env
+CLOUDFLARE_TUNNEL_TOKEN=token-generato-da-cloudflare
+```
+
+Avvia anche il profilo tunnel:
+
+```bash
+docker compose --env-file .env.production --profile tunnel up -d --build
+```
+
+Nginx instrada automaticamente i percorsi dei tool e del post-call webhook al
+gateway ristretto. Nell'app, `Configurazione > Integrazione`, l'URL pubblico deve
+coincidere con `APP_URL`. Su un database nuovo viene inizializzato automaticamente.
+Se `APP_URL` cambia, il backend aggiorna il valore persistito al riavvio.
+
+Il tunnel è facoltativo: lasciando vuoto `CLOUDFLARE_TUNNEL_TOKEN`, Compose avvia
+solo applicazione e gateway per l'uso dietro un reverse proxy tradizionale.
+
+### Aggiornamenti
+
+Dopo il primo deploy puoi aggiornare con:
+
+```bash
+sh ./scripts/deploy.sh
+```
+
+Lo script esegue `git pull --ff-only`, ricostruisce le immagini e abilita
+automaticamente il profilo Cloudflare se trova il token. In alternativa:
+
+```bash
+git pull --ff-only
+docker compose --env-file .env.production up -d --build --remove-orphans
+```
+
+Comandi utili:
+
+```bash
+docker compose --env-file .env.production ps
+docker compose --env-file .env.production logs -f --tail=200
+docker compose --env-file .env.production restart
+```
+
+### Backup
+
+Prima di aggiornamenti importanti, salva l'intera cartella persistente:
+
+```bash
+tar -czf cp-demo-data-$(date +%F-%H%M).tar.gz server-data/
+```
+
+Non eseguire più repliche del backend sullo stesso file SQLite. Per scalare su più
+istanze sarà necessario migrare il database a PostgreSQL e coordinare le campagne
+di chiamata con una coda condivisa.
