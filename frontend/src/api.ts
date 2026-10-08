@@ -57,6 +57,42 @@ export type OutboundCallInput = {
   source?: string | null;
 };
 
+export type OutboundCampaignItem = {
+  id: number;
+  position: number;
+  contact_id?: number | null;
+  reference: string;
+  phone: string;
+  status: "pending" | "calling" | "completed" | "failed" | "cancelled";
+  outbound_call_id?: number | null;
+  conversation_id?: string | null;
+  error?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type OutboundCampaign = {
+  id: number;
+  status: "queued" | "running" | "completed" | "cancelled";
+  total_count: number;
+  completed_count: number;
+  failed_count: number;
+  agent_id: string;
+  agent_phone_number_id: string;
+  source?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  items: OutboundCampaignItem[];
+};
+
+export type OutboundCampaignInput = {
+  contact_ids: number[];
+  agent_id: string;
+  agent_phone_number_id: string;
+  source?: string | null;
+};
+
 export type ElevenLabsPhoneNumber = {
   phone_number_id: string;
   label: string;
@@ -374,6 +410,29 @@ export function listOutboundCalls() {
 
 export function deleteAllOutboundCalls() {
   return request<{ deleted: number }>("/api/outbound-calls", {
+    method: "DELETE",
+  });
+}
+
+export function createOutboundCampaign(input: OutboundCampaignInput) {
+  return request<OutboundCampaign>("/api/outbound-campaigns", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getLatestOutboundCampaign() {
+  return request<OutboundCampaign | null>("/api/outbound-campaigns/latest");
+}
+
+export function cancelOutboundCampaign(id: number) {
+  return request<OutboundCampaign>(`/api/outbound-campaigns/${id}/cancel`, {
+    method: "POST",
+  });
+}
+
+export function deleteOutboundCampaign(id: number) {
+  return request<{ deleted: number }>(`/api/outbound-campaigns/${id}`, {
     method: "DELETE",
   });
 }

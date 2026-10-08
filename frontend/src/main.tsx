@@ -8,8 +8,13 @@ import {
 } from "@elevenlabs/react";
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   BookOpen,
   CalendarClock,
+  Check,
+  Circle,
   Database,
   KeyRound,
   Loader2,
@@ -20,10 +25,12 @@ import {
   PhoneCall,
   PhoneIncoming,
   PhoneOutgoing,
+  Pencil,
   Plus,
   Presentation,
   RefreshCw,
   Save,
+  Search,
   Send,
   Settings,
   Square,
@@ -43,6 +50,7 @@ import {
   ElevenLabsDefaults,
   ElevenLabsPhoneNumber,
   OutboundCall,
+  OutboundCampaign,
   OutboundContact,
   OutboundContactInput,
   VectorSearchResult,
@@ -51,16 +59,20 @@ import {
   UserCreateInput,
   UserUpdateInput,
   changePassword,
+  cancelOutboundCampaign,
   createAppointment,
   createElevenLabsAgent,
   createOutboundContact,
+  createOutboundCampaign,
   createUser,
   deleteAllAppointments,
   deleteAllOutboundCalls,
+  deleteOutboundCampaign,
   deleteElevenLabsAgent,
   deleteOutboundContact,
   deleteUser,
   getCurrentUser,
+  getLatestOutboundCampaign,
   getConversationToken,
   getElevenLabsConfig,
   getSignedUrl,
@@ -96,7 +108,7 @@ type AppView = "demo" | "config" | "users";
 type MainTab = "centralino-entrata" | "centralino-uscita" | "presentazione";
 type VoiceContext = MainTab;
 type NavigationPage = MainTab | "config" | "users";
-type OutboundSection = "operations" | "sources" | "appointments" | "events";
+type OutboundSection = "operations" | "test" | "sources" | "appointments" | "events";
 
 function navigationPageFromHash(): NavigationPage {
   const page = window.location.hash.replace(/^#/, "");
@@ -1409,6 +1421,14 @@ function CentralinoPage({
             <Activity size={17} />
             Eventi
           </button>
+          <button
+            className={outboundSection === "test" ? "active" : ""}
+            type="button"
+            onClick={() => setOutboundSection("test")}
+          >
+            <Mic size={17} />
+            Test
+          </button>
         </nav>
 
         {outboundSection === "operations" && (
@@ -1429,35 +1449,38 @@ function CentralinoPage({
                 <small>{vectorSources.length} PDF indicizzati</small>
               </div>
             </section>
-            <div className="outbound-operations-grid">
-              <VoicePanel
-                agentId={agentId}
-                agentName={selectedAgent?.name}
-                contextMode={flow}
-                elevenLabsConfig={elevenLabsConfig}
-                onSetError={onSetError}
-                onVoiceContextChange={onVoiceContextChange}
-                retrievalQuery={retrievalQuery}
-                selectedVectorSource={selectedVectorSource}
-                title={title}
-              />
-              <OutboundContactsPanel
-                agentId={agentId}
-                contacts={contacts}
-                calls={outboundCalls}
-                onCreate={onCreateContact}
-                onDeleteAllCalls={onDeleteAllOutboundCalls}
-                onDelete={onDeleteContact}
-                onRefreshCalls={onRefreshOutboundCalls}
-                onRefreshPhoneNumbers={onRefreshPhoneNumbers}
-                onSetError={onSetError}
-                onStartCall={onStartOutboundCall}
-                onUpdate={onUpdateContact}
-                phoneNumbers={phoneNumbers}
-                selectedSource={selectedVectorSource}
-              />
-            </div>
+            <OutboundContactsPanel
+              agentId={agentId}
+              contacts={contacts}
+              calls={outboundCalls}
+              onCreate={onCreateContact}
+              onDeleteAllCalls={onDeleteAllOutboundCalls}
+              onDelete={onDeleteContact}
+              onRefreshCalls={onRefreshOutboundCalls}
+              onRefreshPhoneNumbers={onRefreshPhoneNumbers}
+              onSetError={onSetError}
+              onStartCall={onStartOutboundCall}
+              onUpdate={onUpdateContact}
+              phoneNumbers={phoneNumbers}
+              selectedSource={selectedVectorSource}
+            />
           </>
+        )}
+
+        {outboundSection === "test" && (
+          <div className="outbound-test-panel">
+            <VoicePanel
+              agentId={agentId}
+              agentName={selectedAgent?.name}
+              contextMode={flow}
+              elevenLabsConfig={elevenLabsConfig}
+              onSetError={onSetError}
+              onVoiceContextChange={onVoiceContextChange}
+              retrievalQuery={retrievalQuery}
+              selectedVectorSource={selectedVectorSource}
+              title={title}
+            />
+          </div>
         )}
 
         {outboundSection === "sources" && (
@@ -1706,6 +1729,25 @@ function OutboundContactsPanel({
   const [isDeletingCalls, setIsDeletingCalls] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedPhoneNumberId, setSelectedPhoneNumberId] = useState("");
+  const [contactFilter, setContactFilter] = useState(() =>
+    localStorage.getItem("cp-demo-outbound-contact-filter") ?? "",
+  );
+  const [selectionMode, setSelectionMode] = useState<"all" | "selected" | "unselected">("all");
+  const [selectedContactIds, setSelectedContactIds] = useState<Set<number>>(new Set());
+  const [campaign, setCampaign] = useState<OutboundCampaign | null>(null);
+  const [isCampaignModalOpen, setIsCampaignModalOpen] = useState(false);
+  const [isStartingCampaign, setIsStartingCampaign] = useState(false);
+  const [isCancellingCampaign, setIsCancellingCampaign] = useState(false);
+  const [isDeleteCampaignModalOpen, setIsDeleteCampaignModalOpen] = useState(false);
+  const [isDeletingCampaign, setIsDeletingCampaign] = useState(false);
+  const [sortField, setSortField] = useState<"reference" | "phone" | "updated_at">("reference");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [editingContact, setEditingContact] = useState<OutboundContact | null>(null);
+  const [deletingContact, setDeletingContact] = useState<OutboundContact | null>(null);
+  const [editReference, setEditReference] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [isEditingContact, setIsEditingContact] = useState(false);
+  const [isDeletingContact, setIsDeletingContact] = useState(false);
 
   useEffect(() => {
     if (
@@ -1716,6 +1758,115 @@ function OutboundContactsPanel({
     }
     setSelectedPhoneNumberId(phoneNumbers[0]?.phone_number_id ?? "");
   }, [phoneNumbers, selectedPhoneNumberId]);
+
+  useEffect(() => {
+    localStorage.setItem("cp-demo-outbound-contact-filter", contactFilter);
+  }, [contactFilter]);
+
+  useEffect(() => {
+    setSelectedContactIds((current) => {
+      const validIds = new Set(contacts.map((contact) => contact.id));
+      return new Set([...current].filter((id) => validIds.has(id)));
+    });
+  }, [contacts]);
+
+  const refreshCampaign = useCallback(async () => {
+    try {
+      const latest = await getLatestOutboundCampaign();
+      setCampaign(latest);
+      if (latest?.status === "completed" || latest?.status === "cancelled") {
+        await onRefreshCalls();
+      }
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Aggiornamento campagna fallito");
+    }
+  }, [onRefreshCalls, onSetError]);
+
+  useEffect(() => {
+    void refreshCampaign();
+  }, [refreshCampaign]);
+
+  useEffect(() => {
+    if (!campaign || !["queued", "running"].includes(campaign.status)) {
+      return;
+    }
+    const timer = window.setInterval(() => void refreshCampaign(), 2000);
+    return () => window.clearInterval(timer);
+  }, [campaign, refreshCampaign]);
+
+  const filteredContacts = useMemo(() => {
+    const query = contactFilter.trim().toLocaleLowerCase("it-IT");
+    return contacts.filter((contact) => {
+      const matchesQuery =
+        !query ||
+        contact.reference.toLocaleLowerCase("it-IT").includes(query) ||
+        contact.phone.toLocaleLowerCase("it-IT").includes(query);
+      const matchesSelection =
+        selectionMode === "all" ||
+        (selectionMode === "selected" && selectedContactIds.has(contact.id)) ||
+        (selectionMode === "unselected" && !selectedContactIds.has(contact.id));
+      return matchesQuery && matchesSelection;
+    }).sort((left, right) => {
+      const comparison = left[sortField].localeCompare(right[sortField], "it-IT", {
+        numeric: true,
+        sensitivity: "base",
+      });
+      return sortDirection === "asc" ? comparison : -comparison;
+    });
+  }, [contactFilter, contacts, selectedContactIds, selectionMode, sortDirection, sortField]);
+
+  const activeCampaign = campaign && ["queued", "running"].includes(campaign.status);
+  const selectedContacts = contacts.filter((contact) => selectedContactIds.has(contact.id));
+
+  const handleStartCampaign = async () => {
+    if (!agentId || !selectedPhoneNumberId || selectedContacts.length === 0) {
+      return;
+    }
+    setIsStartingCampaign(true);
+    try {
+      const created = await createOutboundCampaign({
+        contact_ids: selectedContacts.map((contact) => contact.id),
+        agent_id: agentId,
+        agent_phone_number_id: selectedPhoneNumberId,
+        source: selectedSource,
+      });
+      setCampaign(created);
+      setSelectedContactIds(new Set());
+      setIsCampaignModalOpen(false);
+      await onRefreshCalls();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Avvio campagna fallito");
+    } finally {
+      setIsStartingCampaign(false);
+    }
+  };
+
+  const handleCancelCampaign = async () => {
+    if (!campaign) return;
+    setIsCancellingCampaign(true);
+    try {
+      setCampaign(await cancelOutboundCampaign(campaign.id));
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Interruzione campagna fallita");
+    } finally {
+      setIsCancellingCampaign(false);
+    }
+  };
+
+  const handleDeleteCampaign = async () => {
+    if (!campaign) return;
+    setIsDeletingCampaign(true);
+    try {
+      await deleteOutboundCampaign(campaign.id);
+      setCampaign(null);
+      setIsDeleteCampaignModalOpen(false);
+      await onRefreshCalls();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Eliminazione campagna fallita");
+    } finally {
+      setIsDeletingCampaign(false);
+    }
+  };
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -1758,6 +1909,56 @@ function OutboundContactsPanel({
     } finally {
       setIsDeletingCalls(false);
     }
+  };
+
+  const handleSort = (field: "reference" | "phone" | "updated_at") => {
+    if (sortField === field) {
+      setSortDirection((current) => current === "asc" ? "desc" : "asc");
+      return;
+    }
+    setSortField(field);
+    setSortDirection("asc");
+  };
+
+  const openEditContact = (contact: OutboundContact) => {
+    setEditingContact(contact);
+    setEditReference(contact.reference);
+    setEditPhone(contact.phone);
+  };
+
+  const handleUpdateContact = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editingContact || !editReference.trim() || !editPhone.trim()) return;
+    setIsEditingContact(true);
+    try {
+      await onUpdate(editingContact.id, {
+        reference: editReference.trim(),
+        phone: editPhone.trim(),
+      });
+      setEditingContact(null);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Aggiornamento contatto fallito");
+    } finally {
+      setIsEditingContact(false);
+    }
+  };
+
+  const handleDeleteContact = async () => {
+    if (!deletingContact) return;
+    setIsDeletingContact(true);
+    try {
+      await onDelete(deletingContact.id);
+      setDeletingContact(null);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Eliminazione contatto fallita");
+    } finally {
+      setIsDeletingContact(false);
+    }
+  };
+
+  const SortIcon = ({ field }: { field: "reference" | "phone" | "updated_at" }) => {
+    if (sortField !== field) return <ArrowUpDown size={14} />;
+    return sortDirection === "asc" ? <ArrowUp size={14} /> : <ArrowDown size={14} />;
   };
 
   return (
@@ -1806,32 +2007,121 @@ function OutboundContactsPanel({
         </button>
       </div>
 
-      <div className="contacts-list">
-        {contacts.length === 0 ? (
-          <p className="muted">Nessun contatto inserito.</p>
-        ) : (
-          contacts.map((contact) => (
-            <OutboundContactRow
-              contact={contact}
-              key={contact.id}
-              canCall={Boolean(agentId && selectedPhoneNumberId)}
-              onDelete={onDelete}
-              onCall={() => {
-                if (!agentId || !selectedPhoneNumberId) {
-                  return Promise.resolve();
-                }
-                return onStartCall(
-                  contact.id,
-                  agentId,
-                  selectedPhoneNumberId,
-                  selectedSource,
-                );
-              }}
-              onSetError={onSetError}
-              onUpdate={onUpdate}
-            />
-          ))
-        )}
+      {campaign && (
+        <CampaignProgress
+          campaign={campaign}
+          isCancelling={isCancellingCampaign}
+          onCancel={() => void handleCancelCampaign()}
+          onDelete={() => setIsDeleteCampaignModalOpen(true)}
+        />
+      )}
+
+      <div className="contact-filter-bar">
+        <label className="contact-search">
+          <Search size={16} />
+          <input
+            aria-label="Cerca contatti"
+            placeholder="Cerca per riferimento o numero"
+            value={contactFilter}
+            onChange={(event) => setContactFilter(event.target.value)}
+          />
+        </label>
+        <div className="contact-filter-modes" aria-label="Filtra contatti">
+          {(["all", "selected", "unselected"] as const).map((mode) => (
+            <button
+              className={selectionMode === mode ? "active" : ""}
+              key={mode}
+              type="button"
+              onClick={() => setSelectionMode(mode)}
+            >
+              {mode === "all" ? "Tutti" : mode === "selected" ? "Selezionati" : "Da selezionare"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="contact-selection-bar">
+        <label className="selection-toggle">
+          <input
+            checked={filteredContacts.length > 0 && filteredContacts.every((contact) => selectedContactIds.has(contact.id))}
+            type="checkbox"
+            onChange={(event) => {
+              setSelectedContactIds((current) => {
+                const next = new Set(current);
+                filteredContacts.forEach((contact) => event.target.checked ? next.add(contact.id) : next.delete(contact.id));
+                return next;
+              });
+            }}
+          />
+          Seleziona visibili
+        </label>
+        <span>{selectedContactIds.size} selezionati</span>
+        <button
+          className="small-button primary"
+          disabled={Boolean(activeCampaign) || selectedContactIds.size === 0 || !agentId || !selectedPhoneNumberId}
+          type="button"
+          onClick={() => setIsCampaignModalOpen(true)}
+        >
+          <PhoneOutgoing size={16} />
+          Avvia serie
+        </button>
+      </div>
+
+      <div className="contacts-table-shell">
+        <table className="contacts-table">
+          <thead>
+            <tr>
+              <th className="contact-check-column">
+                <input
+                  aria-label="Seleziona tutti i contatti visibili"
+                  checked={filteredContacts.length > 0 && filteredContacts.every((contact) => selectedContactIds.has(contact.id))}
+                  type="checkbox"
+                  onChange={(event) => {
+                    setSelectedContactIds((current) => {
+                      const next = new Set(current);
+                      filteredContacts.forEach((contact) => event.target.checked ? next.add(contact.id) : next.delete(contact.id));
+                      return next;
+                    });
+                  }}
+                />
+              </th>
+              <th><button type="button" onClick={() => handleSort("reference")}>Riferimento <SortIcon field="reference" /></button></th>
+              <th><button type="button" onClick={() => handleSort("phone")}>Telefono <SortIcon field="phone" /></button></th>
+              <th><button type="button" onClick={() => handleSort("updated_at")}>Ultima modifica <SortIcon field="updated_at" /></button></th>
+              <th className="contact-actions-column">Azioni</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredContacts.length === 0 ? (
+              <tr><td className="contacts-empty" colSpan={5}>Nessun contatto corrisponde ai filtri.</td></tr>
+            ) : (
+              filteredContacts.map((contact) => (
+                <OutboundContactTableRow
+                  contact={contact}
+                  key={contact.id}
+                  canCall={Boolean(agentId && selectedPhoneNumberId)}
+                  onDelete={() => setDeletingContact(contact)}
+                  onEdit={() => openEditContact(contact)}
+                  onCall={() => {
+                    if (!agentId || !selectedPhoneNumberId) return Promise.resolve();
+                    return onStartCall(contact.id, agentId, selectedPhoneNumberId, selectedSource);
+                  }}
+                  onSetError={onSetError}
+                  selected={selectedContactIds.has(contact.id)}
+                  onSelectedChange={(selected) => setSelectedContactIds((current) => {
+                    const next = new Set(current);
+                    selected ? next.add(contact.id) : next.delete(contact.id);
+                    return next;
+                  })}
+                />
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div className="contacts-table-footer">
+        <span>{filteredContacts.length} di {contacts.length} contatti</span>
+        <span>Ordinati per {sortField === "reference" ? "riferimento" : sortField === "phone" ? "telefono" : "ultima modifica"}</span>
       </div>
 
 
@@ -1910,6 +2200,16 @@ function OutboundContactsPanel({
       </Modal>
 
       <ConfirmDialog
+        confirmLabel="Elimina campagna"
+        description="La campagna e il relativo avanzamento verranno rimossi. I contatti, gli appuntamenti e la cronologia delle chiamate già effettuate resteranno disponibili."
+        isBusy={isDeletingCampaign}
+        isOpen={isDeleteCampaignModalOpen}
+        onClose={() => setIsDeleteCampaignModalOpen(false)}
+        onConfirm={() => void handleDeleteCampaign()}
+        title="Eliminare questa campagna?"
+      />
+
+      <ConfirmDialog
         confirmLabel="Cancella cronologia"
         description="Verranno eliminate tutte le chiamate recenti e le relative trascrizioni salvate. Contatti e appuntamenti non saranno modificati."
         isBusy={isDeletingCalls}
@@ -1918,6 +2218,139 @@ function OutboundContactsPanel({
         onConfirm={() => void handleDeleteAllCalls()}
         title="Pulire le chiamate recenti?"
       />
+
+      <Modal
+        eyebrow="Anagrafica"
+        icon={<Pencil size={20} />}
+        isOpen={Boolean(editingContact)}
+        onClose={isEditingContact ? () => undefined : () => setEditingContact(null)}
+        title="Modifica contatto"
+      >
+        <form onSubmit={handleUpdateContact}>
+          <div className="modal-body modal-form">
+            <label>
+              <span>Riferimento</span>
+              <input autoFocus disabled={isEditingContact} value={editReference} onChange={(event) => setEditReference(event.target.value)} />
+            </label>
+            <label>
+              <span>Numero di telefono</span>
+              <input disabled={isEditingContact} type="tel" value={editPhone} onChange={(event) => setEditPhone(event.target.value)} />
+            </label>
+          </div>
+          <footer className="modal-actions">
+            <button className="secondary-button" disabled={isEditingContact} type="button" onClick={() => setEditingContact(null)}>Annulla</button>
+            <button className="primary-button" disabled={isEditingContact || !editReference.trim() || !editPhone.trim()} type="submit">
+              {isEditingContact ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+              Salva modifiche
+            </button>
+          </footer>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        confirmLabel="Elimina contatto"
+        description={`Il contatto ${deletingContact?.reference ?? ""} verrà rimosso dall'anagrafica. La cronologia delle chiamate resterà disponibile.`}
+        isBusy={isDeletingContact}
+        isOpen={Boolean(deletingContact)}
+        onClose={() => setDeletingContact(null)}
+        onConfirm={() => void handleDeleteContact()}
+        title="Eliminare questo contatto?"
+      />
+
+      <Modal
+        eyebrow="Chiamate in serie"
+        icon={<PhoneOutgoing size={20} />}
+        isOpen={isCampaignModalOpen}
+        onClose={isStartingCampaign ? () => undefined : () => setIsCampaignModalOpen(false)}
+        title={`Avviare ${selectedContacts.length} chiamate?`}
+      >
+        <div className="modal-body">
+          <p className="modal-description">
+            I contatti verranno chiamati uno alla volta. La chiamata successiva partirà solo dopo il salvataggio della trascrizione precedente.
+          </p>
+          <div className="campaign-preview-list">
+            {selectedContacts.map((contact, index) => (
+              <div key={contact.id}><span>{index + 1}</span><strong>{contact.reference}</strong><small>{contact.phone}</small></div>
+            ))}
+          </div>
+        </div>
+        <footer className="modal-actions">
+          <button className="secondary-button" disabled={isStartingCampaign} type="button" onClick={() => setIsCampaignModalOpen(false)}>Annulla</button>
+          <button className="primary-button" disabled={isStartingCampaign} type="button" onClick={() => void handleStartCampaign()}>
+            {isStartingCampaign ? <Loader2 className="spin" size={16} /> : <PhoneOutgoing size={16} />}
+            Avvia chiamate
+          </button>
+        </footer>
+      </Modal>
+    </section>
+  );
+}
+
+function CampaignProgress({
+  campaign,
+  isCancelling,
+  onCancel,
+  onDelete,
+}: {
+  campaign: OutboundCampaign;
+  isCancelling: boolean;
+  onCancel: () => void;
+  onDelete: () => void;
+}) {
+  const processed = campaign.completed_count + campaign.failed_count;
+  const percent = campaign.total_count ? Math.round((processed / campaign.total_count) * 100) : 0;
+  const isActive = ["queued", "running"].includes(campaign.status);
+  const statusLabel = {
+    queued: "In preparazione",
+    running: "In corso",
+    completed: "Completata",
+    cancelled: "Interrotta",
+  }[campaign.status];
+
+  return (
+    <section className={`campaign-progress ${campaign.status}`}>
+      <header>
+        <div>
+          <p className="eyebrow">Campagna #{campaign.id}</p>
+          <h3>{statusLabel}</h3>
+        </div>
+        <div className="campaign-progress-summary">
+          <strong>{processed} / {campaign.total_count}</strong>
+          <span>{percent}%</span>
+        </div>
+      </header>
+      <div className="campaign-progress-track" aria-label={`Avanzamento ${percent}%`}>
+        <span style={{ width: `${percent}%` }} />
+      </div>
+      <div className="campaign-stepper">
+        {campaign.items.map((item) => (
+          <div className={`campaign-step ${item.status}`} key={item.id}>
+            <span className="campaign-step-icon">
+              {item.status === "completed" ? <Check size={15} /> : item.status === "calling" ? <Loader2 className="spin" size={15} /> : item.status === "failed" ? <X size={15} /> : <Circle size={12} />}
+            </span>
+            <div><strong>{item.reference}</strong><small>{item.phone}</small></div>
+            <span className="campaign-step-status">
+              {item.status === "pending" ? "In attesa" : item.status === "calling" ? "In chiamata" : item.status === "completed" ? "Trascritta" : item.status === "failed" ? "Fallita" : "Annullata"}
+            </span>
+            {item.error && <p>{item.error}</p>}
+          </div>
+        ))}
+      </div>
+      <footer>
+        <span>{campaign.failed_count > 0 ? `${campaign.failed_count} fallite` : "Nessun errore"}</span>
+        <div className="campaign-actions">
+          {isActive && (
+            <button className="small-button danger" disabled={isCancelling} type="button" onClick={onCancel}>
+              {isCancelling ? <Loader2 className="spin" size={15} /> : <Square size={14} />}
+              Blocca campagna
+            </button>
+          )}
+          <button className="small-button danger subtle" type="button" onClick={onDelete}>
+            <Trash2 size={15} />
+            Elimina
+          </button>
+        </div>
+      </footer>
     </section>
   );
 }
@@ -1927,15 +2360,19 @@ function OutboundContactRow({
   contact,
   onCall,
   onDelete,
+  onSelectedChange,
   onSetError,
   onUpdate,
+  selected,
 }: {
   canCall: boolean;
   contact: OutboundContact;
   onCall: () => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  onSelectedChange: (selected: boolean) => void;
   onSetError: (value: string | null) => void;
   onUpdate: (id: number, input: OutboundContactInput) => Promise<void>;
+  selected: boolean;
 }) {
   const [reference, setReference] = useState(contact.reference);
   const [phone, setPhone] = useState(contact.phone);
@@ -1984,6 +2421,15 @@ function OutboundContactRow({
   return (
     <>
       <article className="contact-row">
+        <label className="contact-select" title="Seleziona per la serie">
+          <input
+            aria-label={`Seleziona ${contact.reference}`}
+            checked={selected}
+            disabled={isBusy}
+            type="checkbox"
+            onChange={(event) => onSelectedChange(event.target.checked)}
+          />
+        </label>
         <input
           aria-label="Riferimento"
           disabled={isBusy}
@@ -2037,6 +2483,85 @@ function OutboundContactRow({
         title="Eliminare questo contatto?"
       />
     </>
+  );
+}
+
+
+function OutboundContactTableRow({
+  canCall,
+  contact,
+  onCall,
+  onDelete,
+  onEdit,
+  onSelectedChange,
+  onSetError,
+  selected,
+}: {
+  canCall: boolean;
+  contact: OutboundContact;
+  onCall: () => Promise<void>;
+  onDelete: () => void;
+  onEdit: () => void;
+  onSelectedChange: (selected: boolean) => void;
+  onSetError: (value: string | null) => void;
+  selected: boolean;
+}) {
+  const [isCalling, setIsCalling] = useState(false);
+
+  const handleCall = async () => {
+    setIsCalling(true);
+    try {
+      await onCall();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Avvio chiamata fallito");
+    } finally {
+      setIsCalling(false);
+    }
+  };
+
+  return (
+    <tr className={selected ? "selected" : ""}>
+      <td className="contact-check-column">
+        <label className="contact-select" title="Seleziona per la serie">
+          <input
+            aria-label={`Seleziona ${contact.reference}`}
+            checked={selected}
+            disabled={isCalling}
+            type="checkbox"
+            onChange={(event) => onSelectedChange(event.target.checked)}
+          />
+        </label>
+      </td>
+      <td>
+        <div className="contact-reference-cell">
+          <span>{contact.reference.slice(0, 1).toLocaleUpperCase("it-IT")}</span>
+          <strong>{contact.reference}</strong>
+        </div>
+      </td>
+      <td><a className="contact-phone" href={`tel:${contact.phone}`}>{contact.phone}</a></td>
+      <td>
+        <span className="contact-date">
+          {new Date(contact.updated_at).toLocaleDateString("it-IT", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+          })}
+        </span>
+      </td>
+      <td className="contact-actions-column">
+        <div className="contact-actions">
+          <button className="icon-button contact-icon-button call" disabled={isCalling || !canCall} title="Chiama contatto" type="button" onClick={() => void handleCall()}>
+            {isCalling ? <Loader2 className="spin" size={16} /> : <PhoneOutgoing size={16} />}
+          </button>
+          <button className="icon-button contact-icon-button" disabled={isCalling} title="Modifica contatto" type="button" onClick={onEdit}>
+            <Pencil size={16} />
+          </button>
+          <button className="icon-button contact-icon-button danger" disabled={isCalling} title="Elimina contatto" type="button" onClick={onDelete}>
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </td>
+    </tr>
   );
 }
 

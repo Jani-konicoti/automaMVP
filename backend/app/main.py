@@ -42,6 +42,7 @@ SESSION_COOKIE = "cp_demo_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+OUTBOUND_RECONCILE_CHECKS: dict[int, float] = {}
 DEV_ORIGINS = {
     FRONTEND_ORIGIN,
     "http://localhost:5173",
@@ -221,6 +222,42 @@ class OutboundCall(BaseModel):
     created_at: str
     updated_at: str
     completed_at: str | None
+
+
+class OutboundCampaignIn(BaseModel):
+    contact_ids: list[int] = Field(min_length=1, max_length=200)
+    agent_id: str = Field(min_length=1, max_length=180)
+    agent_phone_number_id: str = Field(min_length=1, max_length=180)
+    source: str | None = Field(default=None, max_length=500)
+
+
+class OutboundCampaignItem(BaseModel):
+    id: int
+    position: int
+    contact_id: int | None
+    reference: str
+    phone: str
+    status: str
+    outbound_call_id: int | None
+    conversation_id: str | None
+    error: str | None
+    started_at: str | None
+    completed_at: str | None
+
+
+class OutboundCampaign(BaseModel):
+    id: int
+    status: str
+    total_count: int
+    completed_count: int
+    failed_count: int
+    agent_id: str
+    agent_phone_number_id: str
+    source: str | None
+    created_at: str
+    started_at: str | None
+    completed_at: str | None
+    items: list[OutboundCampaignItem]
 
 
 class ToolKnowledgeIn(BaseModel):
@@ -520,6 +557,58 @@ def ensure_storage() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_outbound_calls_created_at
             ON outbound_calls (created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outbound_campaigns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status TEXT NOT NULL,
+                total_count INTEGER NOT NULL,
+                completed_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                agent_id TEXT NOT NULL,
+                agent_phone_number_id TEXT NOT NULL,
+                source TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS outbound_campaign_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                campaign_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                contact_id INTEGER,
+                reference TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                outbound_call_id INTEGER,
+                conversation_id TEXT,
+                error TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                FOREIGN KEY (campaign_id) REFERENCES outbound_campaigns(id),
+                FOREIGN KEY (contact_id) REFERENCES outbound_contacts(id),
+                FOREIGN KEY (outbound_call_id) REFERENCES outbound_calls(id),
+                UNIQUE (campaign_id, position)
+            )
+            """
+        )
+        call_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(outbound_calls)").fetchall()
+        }
+        for column_name in ("campaign_id", "campaign_item_id"):
+            if column_name not in call_columns:
+                conn.execute(f"ALTER TABLE outbound_calls ADD COLUMN {column_name} INTEGER")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_outbound_campaign_items_campaign
+            ON outbound_campaign_items (campaign_id, position)
             """
         )
         conn.execute(
@@ -890,6 +979,53 @@ def row_to_outbound_call(row: sqlite3.Row) -> OutboundCall:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         completed_at=row["completed_at"],
+    )
+
+
+def row_to_outbound_campaign_item(row: sqlite3.Row) -> OutboundCampaignItem:
+    return OutboundCampaignItem(
+        id=row["id"],
+        position=row["position"],
+        contact_id=row["contact_id"],
+        reference=row["reference"],
+        phone=row["phone"],
+        status=row["status"],
+        outbound_call_id=row["outbound_call_id"],
+        conversation_id=row["conversation_id"],
+        error=row["error"],
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+def get_outbound_campaign(campaign_id: int) -> OutboundCampaign:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        campaign = conn.execute(
+            "SELECT * FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+        ).fetchone()
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campagna non trovata")
+        items = conn.execute(
+            """
+            SELECT * FROM outbound_campaign_items
+            WHERE campaign_id = ? ORDER BY position ASC
+            """,
+            (campaign_id,),
+        ).fetchall()
+    return OutboundCampaign(
+        id=campaign["id"],
+        status=campaign["status"],
+        total_count=campaign["total_count"],
+        completed_count=campaign["completed_count"],
+        failed_count=campaign["failed_count"],
+        agent_id=campaign["agent_id"],
+        agent_phone_number_id=campaign["agent_phone_number_id"],
+        source=campaign["source"],
+        created_at=campaign["created_at"],
+        started_at=campaign["started_at"],
+        completed_at=campaign["completed_at"],
+        items=[row_to_outbound_campaign_item(item) for item in items],
     )
 
 
@@ -2042,8 +2178,11 @@ def normalize_phone_number(value: str) -> str:
     return normalized
 
 
-@app.post("/api/outbound-calls", response_model=OutboundCall)
-async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
+async def initiate_outbound_call(
+    payload: OutboundCallIn,
+    campaign_id: int | None = None,
+    campaign_item_id: int | None = None,
+) -> OutboundCall:
     api_key, agent_id = get_elevenlabs_credentials(payload.agent_id)
     source = ensure_known_source(payload.source)
     now = utc_now()
@@ -2074,8 +2213,9 @@ async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
                 """
                 INSERT INTO outbound_calls (
                     contact_id, reference, phone, agent_id, agent_phone_number_id,
-                    source, status, transcript_text, error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?)
+                    source, status, transcript_text, error, created_at, updated_at,
+                    campaign_id, campaign_item_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.contact_id,
@@ -2087,6 +2227,8 @@ async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
                     error,
                     now,
                     now,
+                    campaign_id,
+                    campaign_item_id,
                 ),
             )
             conn.commit()
@@ -2100,8 +2242,9 @@ async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
                 """
                 INSERT INTO outbound_calls (
                     contact_id, reference, phone, agent_id, agent_phone_number_id,
-                    source, status, transcript_text, error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?)
+                    source, status, transcript_text, error, created_at, updated_at,
+                    campaign_id, campaign_item_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.contact_id,
@@ -2113,6 +2256,8 @@ async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
                     str(error),
                     now,
                     now,
+                    campaign_id,
+                    campaign_item_id,
                 ),
             )
             conn.commit()
@@ -2125,8 +2270,8 @@ async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
             INSERT INTO outbound_calls (
                 contact_id, reference, phone, agent_id, agent_phone_number_id,
                 source, conversation_id, call_sid, status, transcript_text,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'initiated', '', ?, ?)
+                created_at, updated_at, campaign_id, campaign_item_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'initiated', '', ?, ?, ?, ?)
             """,
             (
                 payload.contact_id,
@@ -2139,6 +2284,8 @@ async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
                 data.get("callSid") or data.get("call_sid"),
                 now,
                 now,
+                campaign_id,
+                campaign_item_id,
             ),
         )
         conn.commit()
@@ -2147,6 +2294,342 @@ async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
             (cursor.lastrowid,),
         ).fetchone()
     return row_to_outbound_call(row)
+
+
+@app.post("/api/outbound-calls", response_model=OutboundCall)
+async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
+    return await initiate_outbound_call(payload)
+
+
+async def advance_outbound_campaign(campaign_id: int) -> None:
+    while True:
+        now = utc_now()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            campaign = conn.execute(
+                "SELECT * FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+            ).fetchone()
+            if not campaign or campaign["status"] not in {"queued", "running"}:
+                return
+            calling = conn.execute(
+                """
+                SELECT 1 FROM outbound_campaign_items
+                WHERE campaign_id = ? AND status = 'calling' LIMIT 1
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if calling:
+                return
+            item = conn.execute(
+                """
+                SELECT * FROM outbound_campaign_items
+                WHERE campaign_id = ? AND status = 'pending'
+                ORDER BY position ASC LIMIT 1
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if not item:
+                conn.execute(
+                    """
+                    UPDATE outbound_campaigns
+                    SET status = 'completed', completed_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, campaign_id),
+                )
+                conn.commit()
+                return
+            claimed = conn.execute(
+                """
+                UPDATE outbound_campaign_items
+                SET status = 'calling', started_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (now, item["id"]),
+            )
+            if claimed.rowcount != 1:
+                conn.rollback()
+                continue
+            conn.execute(
+                """
+                UPDATE outbound_campaigns
+                SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, campaign_id),
+            )
+            conn.commit()
+
+        try:
+            call = await initiate_outbound_call(
+                OutboundCallIn(
+                    contact_id=item["contact_id"],
+                    agent_id=campaign["agent_id"],
+                    agent_phone_number_id=campaign["agent_phone_number_id"],
+                    source=campaign["source"],
+                ),
+                campaign_id=campaign_id,
+                campaign_item_id=item["id"],
+            )
+        except HTTPException as exc:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    """
+                    UPDATE outbound_campaign_items
+                    SET status = 'failed', error = ?, completed_at = ? WHERE id = ?
+                    """,
+                    (str(exc.detail), utc_now(), item["id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE outbound_campaigns
+                    SET failed_count = failed_count + 1, updated_at = ? WHERE id = ?
+                    """,
+                    (utc_now(), campaign_id),
+                )
+                conn.commit()
+            continue
+
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE outbound_campaign_items
+                SET outbound_call_id = ?, conversation_id = ? WHERE id = ?
+                """,
+                (call.id, call.conversation_id, item["id"]),
+            )
+            conn.commit()
+        return
+
+
+async def reconcile_outbound_campaign(campaign_id: int) -> None:
+    now_monotonic = time.monotonic()
+    if now_monotonic - OUTBOUND_RECONCILE_CHECKS.get(campaign_id, 0) < 5:
+        return
+    OUTBOUND_RECONCILE_CHECKS[campaign_id] = now_monotonic
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        active = conn.execute(
+            """
+            SELECT i.id AS item_id, i.started_at, c.id AS call_id,
+                   c.conversation_id, c.completed_at
+            FROM outbound_campaign_items i
+            JOIN outbound_calls c ON c.id = i.outbound_call_id
+            WHERE i.campaign_id = ? AND i.status = 'calling'
+            LIMIT 1
+            """,
+            (campaign_id,),
+        ).fetchone()
+    if not active or active["completed_at"] or not active["conversation_id"]:
+        return
+
+    config = get_elevenlabs_config_payload()
+    if not config.api_key:
+        return
+    url = (
+        "https://api.elevenlabs.io/v1/convai/conversations/"
+        f"{active['conversation_id']}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10, verify=ELEVENLABS_VERIFY_SSL) as client:
+            response = await client.get(url, headers={"xi-api-key": config.api_key})
+    except httpx.RequestError:
+        return
+    if response.status_code >= 400:
+        return
+
+    details = response.json()
+    remote_status = str(details.get("status") or "")
+    metadata = details.get("metadata") if isinstance(details.get("metadata"), dict) else {}
+    if remote_status not in {"done", "failed"}:
+        return
+
+    item_status = "failed" if remote_status == "failed" else "completed"
+    error = None
+    if item_status == "failed":
+        error = (
+            str(metadata.get("termination_reason") or metadata.get("error") or "")
+            or "Chiamata non risposta o rifiutata"
+        )
+    transcript = details.get("transcript")
+    transcript_text = transcript_to_text(transcript)
+    now = utc_now()
+    claimed = False
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE outbound_campaign_items
+            SET status = ?, error = ?, completed_at = ?
+            WHERE id = ? AND status = 'calling'
+            """,
+            (item_status, error, now, active["item_id"]),
+        )
+        claimed = cursor.rowcount == 1
+        if claimed:
+            conn.execute(
+                """
+                UPDATE outbound_calls
+                SET status = ?, transcript_json = ?, transcript_text = ?, error = ?,
+                    updated_at = ?, completed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    "failed" if item_status == "failed" else remote_status,
+                    json.dumps(transcript, ensure_ascii=False) if transcript else None,
+                    transcript_text,
+                    error,
+                    now,
+                    now,
+                    active["call_id"],
+                ),
+            )
+            counter = "failed_count" if item_status == "failed" else "completed_count"
+            conn.execute(
+                f"""
+                UPDATE outbound_campaigns
+                SET {counter} = {counter} + 1, updated_at = ? WHERE id = ?
+                """,
+                (now, campaign_id),
+            )
+        conn.commit()
+    if claimed:
+        await advance_outbound_campaign(campaign_id)
+
+
+@app.post("/api/outbound-campaigns", response_model=OutboundCampaign)
+async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampaign:
+    ensure_storage()
+    if len(set(payload.contact_ids)) != len(payload.contact_ids):
+        raise HTTPException(status_code=400, detail="La selezione contiene contatti duplicati")
+    source = ensure_known_source(payload.source)
+    now = utc_now()
+    placeholders = ",".join("?" for _ in payload.contact_ids)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        active = conn.execute(
+            """
+            SELECT id FROM outbound_campaigns
+            WHERE status IN ('queued', 'running') LIMIT 1
+            """
+        ).fetchone()
+        if active:
+            raise HTTPException(status_code=409, detail="Esiste gia una campagna in corso")
+        rows = conn.execute(
+            f"SELECT * FROM outbound_contacts WHERE id IN ({placeholders})",
+            payload.contact_ids,
+        ).fetchall()
+        contacts_by_id = {row["id"]: row for row in rows}
+        if len(contacts_by_id) != len(payload.contact_ids):
+            raise HTTPException(status_code=404, detail="Uno o piu contatti non esistono")
+        cursor = conn.execute(
+            """
+            INSERT INTO outbound_campaigns (
+                status, total_count, agent_id, agent_phone_number_id, source,
+                created_at, updated_at
+            ) VALUES ('queued', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                len(payload.contact_ids),
+                payload.agent_id.strip(),
+                payload.agent_phone_number_id.strip(),
+                source,
+                now,
+                now,
+            ),
+        )
+        campaign_id = cursor.lastrowid
+        for position, contact_id in enumerate(payload.contact_ids, start=1):
+            contact = contacts_by_id[contact_id]
+            conn.execute(
+                """
+                INSERT INTO outbound_campaign_items (
+                    campaign_id, position, contact_id, reference, phone, status
+                ) VALUES (?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    campaign_id,
+                    position,
+                    contact_id,
+                    contact["reference"],
+                    contact["phone"],
+                ),
+            )
+        conn.commit()
+    await advance_outbound_campaign(campaign_id)
+    return get_outbound_campaign(campaign_id)
+
+
+@app.get("/api/outbound-campaigns/latest", response_model=OutboundCampaign | None)
+async def latest_outbound_campaign() -> OutboundCampaign | None:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT id FROM outbound_campaigns ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    campaign = get_outbound_campaign(row[0])
+    if campaign.status in {"queued", "running"}:
+        await reconcile_outbound_campaign(campaign.id)
+        campaign = get_outbound_campaign(campaign.id)
+    return campaign
+
+
+@app.post("/api/outbound-campaigns/{campaign_id}/cancel", response_model=OutboundCampaign)
+def cancel_outbound_campaign(campaign_id: int) -> OutboundCampaign:
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        found = conn.execute(
+            "SELECT status FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+        ).fetchone()
+        if not found:
+            raise HTTPException(status_code=404, detail="Campagna non trovata")
+        if found[0] in {"queued", "running"}:
+            conn.execute(
+                """
+                UPDATE outbound_campaigns
+                SET status = 'cancelled', completed_at = ?, updated_at = ? WHERE id = ?
+                """,
+                (now, now, campaign_id),
+            )
+            conn.execute(
+                """
+                UPDATE outbound_campaign_items
+                SET status = 'cancelled', completed_at = ?
+                WHERE campaign_id = ? AND status = 'pending'
+                """,
+                (now, campaign_id),
+            )
+            conn.commit()
+    return get_outbound_campaign(campaign_id)
+
+
+@app.delete("/api/outbound-campaigns/{campaign_id}")
+def delete_outbound_campaign(campaign_id: int) -> dict[str, int]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        found = conn.execute(
+            "SELECT id FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+        ).fetchone()
+        if not found:
+            raise HTTPException(status_code=404, detail="Campagna non trovata")
+        conn.execute(
+            """
+            UPDATE outbound_calls
+            SET campaign_id = NULL, campaign_item_id = NULL
+            WHERE campaign_id = ?
+            """,
+            (campaign_id,),
+        )
+        conn.execute(
+            "DELETE FROM outbound_campaign_items WHERE campaign_id = ?", (campaign_id,)
+        )
+        cursor = conn.execute(
+            "DELETE FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+        )
+        conn.commit()
+    OUTBOUND_RECONCILE_CHECKS.pop(campaign_id, None)
+    return {"deleted": cursor.rowcount}
 
 
 @app.get("/api/outbound-calls", response_model=list[OutboundCall])
@@ -2418,10 +2901,14 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
         error = None
         completed_at = now
 
+    campaign_to_advance: int | None = None
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         existing = conn.execute(
-            "SELECT id FROM outbound_calls WHERE conversation_id = ?",
+            """
+            SELECT id, campaign_id, campaign_item_id, completed_at
+            FROM outbound_calls WHERE conversation_id = ?
+            """,
             (conversation_id,),
         ).fetchone()
         if existing:
@@ -2443,6 +2930,32 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
                     existing["id"],
                 ),
             )
+            if existing["campaign_id"] and existing["campaign_item_id"] and not existing["completed_at"]:
+                item_status = "failed" if status == "failed" else "completed"
+                conn.execute(
+                    """
+                    UPDATE outbound_campaign_items
+                    SET status = ?, conversation_id = ?, error = ?, completed_at = ?
+                    WHERE id = ? AND status = 'calling'
+                    """,
+                    (
+                        item_status,
+                        conversation_id,
+                        error,
+                        now,
+                        existing["campaign_item_id"],
+                    ),
+                )
+                if conn.total_changes > 1:
+                    counter = "failed_count" if item_status == "failed" else "completed_count"
+                    conn.execute(
+                        f"""
+                        UPDATE outbound_campaigns
+                        SET {counter} = {counter} + 1, updated_at = ? WHERE id = ?
+                        """,
+                        (now, existing["campaign_id"]),
+                    )
+                    campaign_to_advance = existing["campaign_id"]
         else:
             conn.execute(
                 """
@@ -2468,4 +2981,6 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
                 ),
             )
         conn.commit()
+    if campaign_to_advance:
+        await advance_outbound_campaign(campaign_to_advance)
     return {"status": "received"}
