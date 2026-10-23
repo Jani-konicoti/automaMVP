@@ -101,7 +101,6 @@ import {
   saveElevenLabsIntegration,
   saveFlowSource,
   searchVectorStore,
-  startOutboundCall,
   updateElevenLabsAgent,
   updateOutboundContact,
   updateUser,
@@ -492,25 +491,6 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
     [],
   );
 
-  const handleStartOutboundCall = useCallback(
-    async (
-      contactId: number,
-      agentId: string,
-      phoneNumberId: string,
-      source: string | null,
-    ) => {
-      setError(null);
-      const call = await startOutboundCall({
-        contact_id: contactId,
-        agent_id: agentId,
-        agent_phone_number_id: phoneNumberId,
-        source,
-      });
-      setOutboundCalls((current) => [call, ...current.filter((item) => item.id !== call.id)]);
-    },
-    [],
-  );
-
   const handleCreateElevenLabsAgent = useCallback(
     async (input: ElevenLabsAgentInput) => {
       setError(null);
@@ -718,7 +698,6 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         onSaveElevenLabsApiKey={handleSaveElevenLabsApiKey}
         onSaveElevenLabsDefaults={handleSaveElevenLabsDefaults}
         onSaveElevenLabsIntegration={handleSaveElevenLabsIntegration}
-        onStartOutboundCall={handleStartOutboundCall}
         onRefreshOutboundCalls={refreshOutboundCalls}
         onRefreshOutboundContacts={refreshOutboundContacts}
         onRefreshPhoneNumbers={refreshPhoneNumbers}
@@ -788,12 +767,6 @@ type ShellProps = {
     publicBaseUrl: string,
     postCallWebhookSecret: string,
   ) => Promise<void>;
-  onStartOutboundCall: (
-    contactId: number,
-    agentId: string,
-    phoneNumberId: string,
-    source: string | null,
-  ) => Promise<void>;
   onRefreshOutboundCalls: () => Promise<void>;
   onRefreshOutboundContacts: () => Promise<void>;
   onRefreshPhoneNumbers: () => Promise<void>;
@@ -841,7 +814,6 @@ function Shell({
   onSaveElevenLabsApiKey,
   onSaveElevenLabsDefaults,
   onSaveElevenLabsIntegration,
-  onStartOutboundCall,
   onRefreshOutboundCalls,
   onRefreshOutboundContacts,
   onRefreshPhoneNumbers,
@@ -1113,7 +1085,6 @@ function Shell({
                 onDeleteContact={onDeleteOutboundContact}
                 onPdfModeChange={onPdfModeChange}
                 onSetError={onSetError}
-                onStartOutboundCall={onStartOutboundCall}
                 onRefreshOutboundCalls={onRefreshOutboundCalls}
                 onRefreshOutboundContacts={onRefreshOutboundContacts}
                 onRefreshPhoneNumbers={onRefreshPhoneNumbers}
@@ -1398,7 +1369,6 @@ function CentralinoPage({
   onDeleteAllOutboundCalls,
   onDeleteContact,
   onSetError,
-  onStartOutboundCall,
   onRefreshOutboundCalls,
   onRefreshOutboundContacts,
   onRefreshPhoneNumbers,
@@ -1430,12 +1400,6 @@ function CentralinoPage({
   onDeleteAllOutboundCalls?: () => Promise<void>;
   onDeleteContact?: (id: number) => Promise<void>;
   onSetError: (value: string | null) => void;
-  onStartOutboundCall?: (
-    contactId: number,
-    agentId: string,
-    phoneNumberId: string,
-    source: string | null,
-  ) => Promise<void>;
   onRefreshOutboundCalls?: () => Promise<void>;
   onRefreshOutboundContacts?: () => Promise<void>;
   onRefreshPhoneNumbers?: () => Promise<void>;
@@ -1461,7 +1425,6 @@ function CentralinoPage({
     onCreateContact &&
     onDeleteContact &&
     onUpdateContact &&
-    onStartOutboundCall &&
     onDeleteAllOutboundCalls &&
     onRefreshOutboundCalls &&
     onRefreshOutboundContacts &&
@@ -1542,7 +1505,6 @@ function CentralinoPage({
               onRefreshContacts={onRefreshOutboundContacts}
               onRefreshPhoneNumbers={onRefreshPhoneNumbers}
               onSetError={onSetError}
-              onStartCall={onStartOutboundCall}
               onUpdate={onUpdateContact}
               phoneNumbers={phoneNumbers}
               selectedSource={selectedVectorSource}
@@ -1783,7 +1745,6 @@ function OutboundContactsPanel({
   onRefreshPhoneNumbers,
   onRefreshContacts,
   onSetError,
-  onStartCall,
   onUpdate,
   phoneNumbers,
   selectedSource,
@@ -1798,12 +1759,6 @@ function OutboundContactsPanel({
   onRefreshPhoneNumbers: () => Promise<void>;
   onRefreshContacts: () => Promise<void>;
   onSetError: (value: string | null) => void;
-  onStartCall: (
-    contactId: number,
-    agentId: string,
-    phoneNumberId: string,
-    source: string | null,
-  ) => Promise<void>;
   onUpdate: (id: number, input: OutboundContactInput) => Promise<void>;
   phoneNumbers: ElevenLabsPhoneNumber[];
   selectedSource: string | null;
@@ -2303,14 +2258,8 @@ function OutboundContactsPanel({
                 <OutboundContactTableRow
                   contact={contact}
                   key={contact.id}
-                  canCall={Boolean(agentId && selectedPhoneNumberId)}
                   onDelete={() => setDeletingContact(contact)}
                   onEdit={() => openEditContact(contact)}
-                  onCall={() => {
-                    if (!agentId || !selectedPhoneNumberId) return Promise.resolve();
-                    return onStartCall(contact.id, agentId, selectedPhoneNumberId, selectedSource);
-                  }}
-                  onSetError={onSetError}
                   selected={selectedContactIds.has(contact.id)}
                   onSelectedChange={(selected) => setSelectedContactIds((current) => {
                     const next = new Set(current);
@@ -2659,17 +2608,6 @@ function OutboundContactRow({
     }
   };
 
-  const handleCall = async () => {
-    setIsBusy(true);
-    try {
-      await onCall();
-    } catch (err) {
-      onSetError(err instanceof Error ? err.message : "Avvio chiamata fallito");
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
   const isUnchanged = reference === contact.reference && phone === contact.phone;
 
   return (
@@ -2698,15 +2636,6 @@ function OutboundContactRow({
           onChange={(event) => setPhone(event.target.value)}
         />
         <div className="contact-actions">
-          <button
-            className="icon-button contact-icon-button call"
-            disabled={isBusy || !canCall}
-            title="Chiama contatto"
-            type="button"
-            onClick={handleCall}
-          >
-            {isBusy ? <Loader2 className="spin" size={16} /> : <PhoneOutgoing size={16} />}
-          </button>
           <button
             className="icon-button contact-icon-button"
             disabled={isBusy || isUnchanged || !reference.trim() || !phone.trim()}
@@ -2742,37 +2671,18 @@ function OutboundContactRow({
 
 
 function OutboundContactTableRow({
-  canCall,
   contact,
-  onCall,
   onDelete,
   onEdit,
   onSelectedChange,
-  onSetError,
   selected,
 }: {
-  canCall: boolean;
   contact: OutboundContact;
-  onCall: () => Promise<void>;
   onDelete: () => void;
   onEdit: () => void;
   onSelectedChange: (selected: boolean) => void;
-  onSetError: (value: string | null) => void;
   selected: boolean;
 }) {
-  const [isCalling, setIsCalling] = useState(false);
-
-  const handleCall = async () => {
-    setIsCalling(true);
-    try {
-      await onCall();
-    } catch (err) {
-      onSetError(err instanceof Error ? err.message : "Avvio chiamata fallito");
-    } finally {
-      setIsCalling(false);
-    }
-  };
-
   return (
     <tr className={selected ? "selected" : ""}>
       <td className="contact-check-column">
@@ -2780,7 +2690,6 @@ function OutboundContactTableRow({
           <input
             aria-label={`Seleziona ${contact.reference}`}
             checked={selected}
-            disabled={isCalling}
             type="checkbox"
             onChange={(event) => onSelectedChange(event.target.checked)}
           />
@@ -2804,13 +2713,10 @@ function OutboundContactTableRow({
       </td>
       <td className="contact-actions-column">
         <div className="contact-actions">
-          <button className="icon-button contact-icon-button call" disabled={isCalling || !canCall} title="Chiama contatto" type="button" onClick={() => void handleCall()}>
-            {isCalling ? <Loader2 className="spin" size={16} /> : <PhoneOutgoing size={16} />}
-          </button>
-          <button className="icon-button contact-icon-button" disabled={isCalling} title="Modifica contatto" type="button" onClick={onEdit}>
+          <button className="icon-button contact-icon-button" title="Modifica contatto" type="button" onClick={onEdit}>
             <Pencil size={16} />
           </button>
-          <button className="icon-button contact-icon-button danger" disabled={isCalling} title="Elimina contatto" type="button" onClick={onDelete}>
+          <button className="icon-button contact-icon-button danger" title="Elimina contatto" type="button" onClick={onDelete}>
             <Trash2 size={16} />
           </button>
         </div>
