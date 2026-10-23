@@ -177,13 +177,30 @@ export type VectorSearchResult = {
 export type AuthUser = {
   id: number;
   username: string;
-  role: "admin" | "user";
+  role: "superadmin" | "admin" | "user";
   can_inbound: boolean;
   can_outbound: boolean;
   can_presentation: boolean;
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  tenant_id: number;
+  tenant_name: string;
+};
+
+export type Tenant = {
+  id: number;
+  name: string;
+  slug: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ContactImportResult = {
+  imported: number;
+  skipped: number;
+  errors: string[];
 };
 
 export type UserCreateInput = {
@@ -200,10 +217,12 @@ export type UserUpdateInput = Omit<UserCreateInput, "password"> & {
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const selectedTenant = localStorage.getItem("cp-agent-tenant-id");
   const response = await fetch(`${API_BASE_URL}${path}`, {
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      ...(selectedTenant ? { "X-Tenant-ID": selectedTenant } : {}),
       ...options?.headers,
     },
     ...options,
@@ -295,6 +314,9 @@ export async function uploadVectorStorePdf(file: File, mode: "append" | "replace
     {
       method: "POST",
       credentials: "include",
+      headers: localStorage.getItem("cp-agent-tenant-id")
+        ? { "X-Tenant-ID": localStorage.getItem("cp-agent-tenant-id")! }
+        : undefined,
       body: formData,
     },
   );
@@ -397,6 +419,28 @@ export function deleteOutboundContact(id: number) {
   });
 }
 
+export async function importOutboundContacts(file: File) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const selectedTenant = localStorage.getItem("cp-agent-tenant-id");
+  const response = await fetch(`${API_BASE_URL}/api/outbound-contacts/import`, {
+    method: "POST",
+    credentials: "include",
+    headers: selectedTenant ? { "X-Tenant-ID": selectedTenant } : undefined,
+    body: formData,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    try {
+      throw new Error((JSON.parse(body) as { detail?: string }).detail || body);
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new Error(body || `HTTP ${response.status}`);
+      throw error;
+    }
+  }
+  return response.json() as Promise<ContactImportResult>;
+}
+
 
 export function startOutboundCall(input: OutboundCallInput) {
   return request<OutboundCall>("/api/outbound-calls", {
@@ -424,6 +468,10 @@ export function createOutboundCampaign(input: OutboundCampaignInput) {
 
 export function getLatestOutboundCampaign() {
   return request<OutboundCampaign | null>("/api/outbound-campaigns/latest");
+}
+
+export function listOutboundCampaigns() {
+  return request<OutboundCampaign[]>("/api/outbound-campaigns");
 }
 
 export function cancelOutboundCampaign(id: number) {
@@ -487,4 +535,20 @@ export function resetUserPassword(id: number, password: string) {
 
 export function deleteUser(id: number) {
   return request<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" });
+}
+
+export function listTenants() {
+  return request<Tenant[]>("/api/tenants");
+}
+
+export function createTenant(input: { name: string; slug: string }) {
+  return request<Tenant>("/api/tenants", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateTenant(id: number, input: { name: string; slug: string }) {
+  return request<Tenant>(`/api/tenants/${id}`, { method: "PUT", body: JSON.stringify(input) });
+}
+
+export function deactivateTenant(id: number) {
+  return request<{ ok: boolean }>(`/api/tenants/${id}`, { method: "DELETE" });
 }

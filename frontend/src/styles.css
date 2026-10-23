@@ -114,7 +114,7 @@ button:disabled {
 .sidebar-navigation p {
   color: #7f9389;
   font-size: 0.7rem;
-  font-weight: 800;
+  font-weight: 900;
   letter-spacing: 0.08em;
   margin: 18px 10px 7px;
   text-transform: uppercase;
@@ -336,6 +336,10 @@ button:disabled {
   justify-content: center;
   min-height: 100vh;
   padding: 24px;
+}
+
+.login-page * {
+  box-sizing: border-box;
 }
 
 .login-panel {
@@ -563,6 +567,15 @@ button:disabled {
 .outbound-workspace {
   display: grid;
   gap: 14px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.workspace-subnav,
+.outbound-context-bar,
+.contacts-panel {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .workspace-subnav {
@@ -2318,11 +2331,107 @@ select:focus,
 .login-visual h1 {
   color: #121826;
   font-size: clamp(2.8rem, 6vw, 5.6rem);
-  font-weight: 900;
+  font-synthesis: weight;
+  font-weight: 800;
   letter-spacing: 0;
   line-height: 0.95;
   margin: 12px 0 14px;
 }
+
+.login-visual h1 span {
+  color: #d91f2a;
+  font-weight: 900;
+}
+
+.tenant-switcher {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.tenant-switcher span {
+  color: #79827c;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.tenant-switcher select {
+  background: #ffffff;
+  border: 1px solid #d6ddd5;
+  border-radius: 6px;
+  color: #26322b;
+  min-height: 38px;
+  padding: 0 8px;
+  width: 100%;
+}
+
+.tenant-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+}
+
+.tenant-card {
+  align-items: center;
+  border: 1px solid #dce3db;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  padding: 14px;
+}
+
+.tenant-card .small-button { grid-column: 2 / -1; justify-self: end; }
+.tenant-card > div { display: grid; gap: 2px; }
+.tenant-card small { color: #727d75; }
+.tenant-icon { align-items: center; background: #edf3ef; border-radius: 7px; color: #1f6f5b; display: flex; height: 38px; justify-content: center; width: 38px; }
+.tenant-status { color: #26704e; font-size: 0.72rem; font-weight: 800; }
+.tenant-card.inactive { opacity: 0.6; }
+.tenant-note { color: #69766e; font-size: 0.82rem; margin: 18px 0 0; }
+
+.data-view-tabs {
+  border-bottom: 1px solid #dce3db;
+  display: flex;
+  gap: 4px;
+  margin: -4px 0 14px;
+  overflow-x: auto;
+}
+
+.data-view-tabs button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #68746c;
+  display: inline-flex;
+  font-size: 0.82rem;
+  font-weight: 800;
+  gap: 7px;
+  min-height: 42px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.data-view-tabs button.active { border-bottom-color: #d91f2a; color: #172019; }
+.data-view-tabs button span { background: #edf2ee; border-radius: 999px; font-size: 0.68rem; padding: 2px 6px; }
+
+.data-empty-state { align-items: center; color: #6e7972; display: flex; flex-direction: column; gap: 6px; justify-content: center; min-height: 240px; text-align: center; }
+.data-empty-state strong { color: #243029; }
+
+.campaign-archive { border-top: 1px solid #e0e6df; display: grid; gap: 6px; margin-top: 14px; padding-top: 14px; }
+.campaign-archive .section-heading { align-items: center; display: flex; justify-content: space-between; }
+.campaign-archive .section-heading h3 { font-size: 0.9rem; margin: 0; }
+.campaign-archive > button { align-items: center; background: #fff; border: 1px solid #dfe5de; border-radius: 7px; display: grid; gap: 10px; grid-template-columns: 44px minmax(100px, 1fr) auto auto; padding: 10px; text-align: left; }
+.campaign-archive > button:hover { background: #f7f9f6; border-color: #bdcabe; }
+.campaign-archive small, .campaign-archive time { color: #6c786f; font-size: 0.74rem; }
+
+.csv-dropzone { align-items: center; border: 1px dashed #aebdb1; border-radius: 8px; cursor: pointer; display: flex !important; flex-direction: column; gap: 7px !important; justify-content: center; min-height: 150px; padding: 22px; text-align: center; }
+.csv-dropzone input { max-width: 260px; min-height: auto; }
+.csv-dropzone span { color: #6c786f; font-size: 0.78rem; }
+.import-result { background: #eff7f2; border: 1px solid #cadfcf; border-radius: 7px; display: grid; gap: 5px; padding: 12px; }
+.import-result details p { color: #7f342e; font-size: 0.75rem; margin: 5px 0; }
+.transcript-toolbar { margin-bottom: 12px; }
 
 .login-visual > p {
   color: #526071;
@@ -2487,6 +2596,15 @@ select:focus,
 
   .app-content {
     padding: 14px;
+  }
+
+  .panel-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .panel-heading-actions {
+    flex-wrap: wrap;
   }
 
   .login-page {

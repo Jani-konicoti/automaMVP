@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import csv
 import json
 import hashlib
 import hmac
@@ -10,8 +11,9 @@ import secrets
 import sqlite3
 import time
 from collections import Counter
+from contextvars import ContextVar
 from datetime import datetime
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
 
@@ -38,13 +40,14 @@ ELEVENLABS_VERIFY_SSL = os.getenv("ELEVENLABS_VERIFY_SSL", "true").lower() not i
     "false",
     "no",
 }
-SESSION_COOKIE = "cp_demo_session"
+SESSION_COOKIE = "cp_agent_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
 INITIAL_ADMIN_PASSWORD = os.getenv("INITIAL_ADMIN_PASSWORD", "Cambiami24!")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 OUTBOUND_RECONCILE_CHECKS: dict[int, float] = {}
+CURRENT_TENANT_ID: ContextVar[int] = ContextVar("current_tenant_id", default=1)
 DEV_ORIGINS = {
     FRONTEND_ORIGIN,
     "http://localhost:5173",
@@ -53,7 +56,7 @@ DEV_ORIGINS = {
     "http://127.0.0.1:5174",
 }
 
-app = FastAPI(title="CP DEMO")
+app = FastAPI(title="CP AGENT")
 
 app.add_middleware(
     CORSMiddleware,
@@ -312,6 +315,26 @@ class AuthUser(BaseModel):
     is_active: bool
     created_at: str
     updated_at: str
+    tenant_id: int
+    tenant_name: str
+
+
+class TenantIn(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    slug: str = Field(min_length=2, max_length=80)
+
+
+class Tenant(TenantIn):
+    id: int
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class ContactImportResult(BaseModel):
+    imported: int
+    skipped: int
+    errors: list[str]
 
 
 TOKEN_RE = re.compile(r"[a-zA-ZÀ-ÿ0-9]{2,}")
@@ -402,6 +425,24 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+def tenant_id() -> int:
+    return CURRENT_TENANT_ID.get()
+
+
+def normalize_tenant_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9-]+", "-", value.strip().lower()).strip("-")
+    if len(slug) < 2:
+        raise HTTPException(status_code=400, detail="Slug tenant non valido")
+    return slug
+
+
+def add_tenant_column(conn: sqlite3.Connection, table: str) -> None:
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if "tenant_id" not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_tenant_id ON {table} (tenant_id)")
+
+
 def ensure_storage() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not BEHAVIOR_PATH.exists() or not DOCUMENTATION_PATH.exists():
@@ -416,7 +457,7 @@ def ensure_storage() -> None:
                 "Non dire mai l'ID dell'appuntamento."
             )
             documentation = (
-                "Siamo CP DEMO. Orari: lunedi-venerdi 09:00-18:00."
+                "Siamo CP AGENT. Orari: lunedi-venerdi 09:00-18:00."
             )
 
         if not BEHAVIOR_PATH.exists():
@@ -646,6 +687,57 @@ def ensure_storage() -> None:
             ON user_sessions (user_id)
             """
         )
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL UNIQUE,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        if conn.execute("SELECT COUNT(*) FROM tenants").fetchone()[0] == 0:
+            conn.execute(
+                "INSERT INTO tenants (id, name, slug, is_active, created_at, updated_at) VALUES (1, 'Tenant principale', 'principale', 1, ?, ?)",
+                (now, now),
+            )
+        for table in (
+            "appointments", "outbound_contacts", "vector_chunks", "bot_behaviors",
+            "elevenlabs_agents", "outbound_calls", "outbound_campaigns",
+            "outbound_campaign_items",
+        ):
+            add_tenant_column(conn, table)
+        user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "tenant_id" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
+        if "is_superadmin" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_superadmin INTEGER NOT NULL DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users (tenant_id)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenant_configs (
+                tenant_id INTEGER PRIMARY KEY,
+                api_key TEXT NOT NULL DEFAULT '',
+                inbound_agent_id TEXT,
+                outbound_agent_id TEXT,
+                presentation_agent_id TEXT,
+                inbound_source TEXT,
+                outbound_source TEXT,
+                presentation_source TEXT,
+                public_base_url TEXT NOT NULL DEFAULT '',
+                tool_webhook_secret TEXT NOT NULL DEFAULT '',
+                post_call_webhook_secret TEXT NOT NULL DEFAULT '',
+                behavior TEXT NOT NULL DEFAULT '',
+                documentation TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            )
+            """
+        )
         behaviors_count = conn.execute("SELECT COUNT(*) FROM bot_behaviors").fetchone()[0]
         if behaviors_count == 0:
             now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -657,7 +749,6 @@ def ensure_storage() -> None:
                 """,
                 ("Predefinito", content, now, now),
             )
-        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         users_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if users_count == 0:
             conn.execute(
@@ -669,6 +760,7 @@ def ensure_storage() -> None:
                 """,
                 ("admin", hash_password(INITIAL_ADMIN_PASSWORD), now, now),
             )
+        conn.execute("UPDATE users SET is_superadmin = 1, tenant_id = 1 WHERE username = 'admin'")
         conn.execute("DELETE FROM user_sessions WHERE expires_at <= ?", (int(time.time()),))
         config_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_config").fetchone()[0]
         if config_count == 0:
@@ -706,6 +798,42 @@ def ensure_storage() -> None:
                     """,
                     (PUBLIC_BASE_URL, now, PUBLIC_BASE_URL),
                 )
+        legacy_config = conn.execute(
+            """
+            SELECT COALESCE(api_key, ''), inbound_agent_id, outbound_agent_id,
+                   presentation_agent_id, inbound_source, outbound_source,
+                   presentation_source, COALESCE(public_base_url, ''),
+                   COALESCE(tool_webhook_secret, ''),
+                   COALESCE(post_call_webhook_secret, '')
+            FROM elevenlabs_config WHERE id = 1
+            """
+        ).fetchone()
+        if conn.execute("SELECT COUNT(*) FROM tenant_configs WHERE tenant_id = 1").fetchone()[0] == 0:
+            conn.execute(
+                """
+                INSERT INTO tenant_configs (
+                    tenant_id, api_key, inbound_agent_id, outbound_agent_id,
+                    presentation_agent_id, inbound_source, outbound_source,
+                    presentation_source, public_base_url, tool_webhook_secret,
+                    post_call_webhook_secret, behavior, documentation, updated_at
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    legacy_config[0] if legacy_config else "",
+                    legacy_config[1] if legacy_config else None,
+                    legacy_config[2] if legacy_config else None,
+                    legacy_config[3] if legacy_config else None,
+                    legacy_config[4] if legacy_config else None,
+                    legacy_config[5] if legacy_config else None,
+                    legacy_config[6] if legacy_config else None,
+                    legacy_config[7] if legacy_config else PUBLIC_BASE_URL,
+                    legacy_config[8] if legacy_config and legacy_config[8] else secrets.token_urlsafe(32),
+                    legacy_config[9] if legacy_config else "",
+                    BEHAVIOR_PATH.read_text(encoding="utf-8"),
+                    DOCUMENTATION_PATH.read_text(encoding="utf-8"),
+                    now,
+                ),
+            )
         agents_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_agents").fetchone()[0]
         env_agent_id = os.getenv("ELEVENLABS_AGENT_ID", "").strip()
         if agents_count == 0 and env_agent_id:
@@ -720,17 +848,20 @@ def ensure_storage() -> None:
 
 
 def row_to_auth_user(row: sqlite3.Row) -> AuthUser:
-    is_admin = row["role"] == "admin"
+    is_superadmin = bool(row["is_superadmin"])
+    is_admin = row["role"] == "admin" or is_superadmin
     return AuthUser(
         id=row["id"],
         username=row["username"],
-        role=row["role"],
+        role="superadmin" if is_superadmin else row["role"],
         can_inbound=is_admin or bool(row["can_inbound"]),
         can_outbound=is_admin or bool(row["can_outbound"]),
         can_presentation=is_admin or bool(row["can_presentation"]),
         is_active=bool(row["is_active"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        tenant_id=row["tenant_id"],
+        tenant_name=row["tenant_name"],
     )
 
 
@@ -746,9 +877,10 @@ def user_from_session(token: str | None) -> AuthUser | None:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             """
-            SELECT u.*
+            SELECT u.*, t.name AS tenant_name
             FROM user_sessions s
             JOIN users u ON u.id = s.user_id
+            JOIN tenants t ON t.id = u.tenant_id
             WHERE s.token_hash = ? AND s.expires_at > ? AND u.is_active = 1
             """,
             (session_token_hash(token), int(time.time())),
@@ -764,8 +896,13 @@ def request_user(request: Request) -> AuthUser:
 
 
 def ensure_admin(user: AuthUser) -> None:
-    if user.role != "admin":
+    if user.role not in {"admin", "superadmin"}:
         raise HTTPException(status_code=403, detail="Permessi amministratore richiesti")
+
+
+def ensure_superadmin(user: AuthUser) -> None:
+    if user.role != "superadmin":
+        raise HTTPException(status_code=403, detail="Permessi superadmin richiesti")
 
 
 def api_error(request: Request, status_code: int, detail: str) -> JSONResponse:
@@ -796,6 +933,19 @@ async def authenticate_request(request: Request, call_next):
     if not user:
         return api_error(request, 401, "Autenticazione richiesta")
     request.state.user = user
+    selected_tenant_id = user.tenant_id
+    if user.role == "superadmin":
+        requested_tenant = request.headers.get("X-Tenant-ID")
+        if requested_tenant and requested_tenant.isdigit():
+            with sqlite3.connect(DB_PATH) as conn:
+                found = conn.execute(
+                    "SELECT id FROM tenants WHERE id = ? AND is_active = 1",
+                    (int(requested_tenant),),
+                ).fetchone()
+            if found:
+                selected_tenant_id = found[0]
+    request.state.tenant_id = selected_tenant_id
+    tenant_token = CURRENT_TENANT_ID.set(selected_tenant_id)
 
     admin_only = (
         path.startswith("/api/users")
@@ -806,15 +956,18 @@ async def authenticate_request(request: Request, call_next):
             and request.method != "GET"
         )
     )
-    if admin_only and user.role != "admin":
+    if admin_only and user.role not in {"admin", "superadmin"}:
+        CURRENT_TENANT_ID.reset(tenant_token)
         return api_error(request, 403, "Permessi amministratore richiesti")
 
     if (
         path.startswith("/api/outbound-")
         or path == "/api/elevenlabs/phone-numbers"
     ) and not user.can_outbound:
+        CURRENT_TENANT_ID.reset(tenant_token)
         return permission_denied(request)
     if path.startswith("/api/appointments") and not (user.can_inbound or user.can_outbound):
+        CURRENT_TENANT_ID.reset(tenant_token)
         return permission_denied(request)
     if path in {"/api/elevenlabs/signed-url", "/api/elevenlabs/conversation-token"}:
         flow = request.query_params.get("flow")
@@ -824,9 +977,13 @@ async def authenticate_request(request: Request, call_next):
             "presentazione": user.can_presentation,
         }
         if not flow or not flow_allowed.get(flow, False):
+            CURRENT_TENANT_ID.reset(tenant_token)
             return permission_denied(request)
 
-    return await call_next(request)
+    try:
+        return await call_next(request)
+    finally:
+        CURRENT_TENANT_ID.reset(tenant_token)
 
 
 def row_to_bot_behavior(row: sqlite3.Row) -> BotBehavior:
@@ -846,9 +1003,9 @@ def list_bot_behaviors() -> list[BotBehavior]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT * FROM bot_behaviors
+            SELECT * FROM bot_behaviors WHERE tenant_id = ?
             ORDER BY is_active DESC, updated_at DESC, id DESC
-            """
+            """, (tenant_id(),)
         ).fetchall()
 
     return [row_to_bot_behavior(row) for row in rows]
@@ -858,7 +1015,8 @@ def update_active_bot_behavior(content: str) -> None:
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     with sqlite3.connect(DB_PATH) as conn:
         active_id = conn.execute(
-            "SELECT id FROM bot_behaviors WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+            "SELECT id FROM bot_behaviors WHERE tenant_id = ? AND is_active = 1 ORDER BY id DESC LIMIT 1",
+            (tenant_id(),),
         ).fetchone()
         if active_id:
             conn.execute(
@@ -872,10 +1030,10 @@ def update_active_bot_behavior(content: str) -> None:
         else:
             conn.execute(
                 """
-                INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at)
-                VALUES (?, ?, 1, ?, ?)
+                INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at, tenant_id)
+                VALUES (?, ?, 1, ?, ?, ?)
                 """,
-                ("Predefinito", content, now, now),
+                ("Predefinito", content, now, now, tenant_id()),
             )
         conn.commit()
 
@@ -897,9 +1055,9 @@ def list_elevenlabs_agents() -> list[ElevenLabsAgent]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
-            SELECT * FROM elevenlabs_agents
+            SELECT * FROM elevenlabs_agents WHERE tenant_id = ?
             ORDER BY is_active DESC, updated_at DESC, id DESC
-            """
+            """, (tenant_id(),)
         ).fetchall()
 
     return [row_to_elevenlabs_agent(row) for row in rows]
@@ -910,7 +1068,7 @@ def get_elevenlabs_config_payload() -> ElevenLabsConfig:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         config = conn.execute(
-            "SELECT * FROM elevenlabs_config WHERE id = 1"
+            "SELECT * FROM tenant_configs WHERE tenant_id = ?", (tenant_id(),)
         ).fetchone()
 
     api_key = config["api_key"] if config else ""
@@ -1016,16 +1174,16 @@ def get_outbound_campaign(campaign_id: int) -> OutboundCampaign:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         campaign = conn.execute(
-            "SELECT * FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+            "SELECT * FROM outbound_campaigns WHERE id = ? AND tenant_id = ?", (campaign_id, tenant_id())
         ).fetchone()
         if not campaign:
             raise HTTPException(status_code=404, detail="Campagna non trovata")
         items = conn.execute(
             """
             SELECT * FROM outbound_campaign_items
-            WHERE campaign_id = ? ORDER BY position ASC
+            WHERE campaign_id = ? AND tenant_id = ? ORDER BY position ASC
             """,
-            (campaign_id,),
+            (campaign_id, tenant_id()),
         ).fetchall()
     return OutboundCampaign(
         id=campaign["id"],
@@ -1132,7 +1290,10 @@ def index_vector_chunks(source: str, text: str, replace_source: bool = True) -> 
     created_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     with sqlite3.connect(DB_PATH) as conn:
         if replace_source:
-            conn.execute("DELETE FROM vector_chunks WHERE source = ?", (source,))
+            conn.execute(
+                "DELETE FROM vector_chunks WHERE source = ? AND tenant_id = ?",
+                (source, tenant_id()),
+            )
 
         inserted = 0
         for index, chunk in enumerate(chunks):
@@ -1142,8 +1303,8 @@ def index_vector_chunks(source: str, text: str, replace_source: bool = True) -> 
 
             conn.execute(
                 """
-                INSERT INTO vector_chunks (source, chunk_index, text, vector_json, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO vector_chunks (source, chunk_index, text, vector_json, created_at, tenant_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source,
@@ -1151,6 +1312,7 @@ def index_vector_chunks(source: str, text: str, replace_source: bool = True) -> 
                     chunk,
                     json.dumps(vector, ensure_ascii=False),
                     created_at,
+                    tenant_id(),
                 ),
             )
             inserted += 1
@@ -1179,13 +1341,14 @@ def search_vector_chunks(
                 """
                 SELECT id, source, chunk_index, text, vector_json
                 FROM vector_chunks
-                WHERE source = ?
+                WHERE source = ? AND tenant_id = ?
                 """,
-                (source,),
+                (source, tenant_id()),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, source, chunk_index, text, vector_json FROM vector_chunks"
+                "SELECT id, source, chunk_index, text, vector_json FROM vector_chunks WHERE tenant_id = ?",
+                (tenant_id(),),
             ).fetchall()
 
     scored: list[VectorSearchResult] = []
@@ -1217,9 +1380,9 @@ def search_vector_chunks(
 def get_vector_store_stats() -> VectorStoreStats:
     ensure_storage()
     with sqlite3.connect(DB_PATH) as conn:
-        chunks = conn.execute("SELECT COUNT(*) FROM vector_chunks").fetchone()[0]
+        chunks = conn.execute("SELECT COUNT(*) FROM vector_chunks WHERE tenant_id = ?", (tenant_id(),)).fetchone()[0]
         sources = conn.execute(
-            "SELECT COUNT(DISTINCT source) FROM vector_chunks"
+            "SELECT COUNT(DISTINCT source) FROM vector_chunks WHERE tenant_id = ?", (tenant_id(),)
         ).fetchone()[0]
 
     return VectorStoreStats(chunks=chunks, sources=sources)
@@ -1237,16 +1400,17 @@ def list_vector_sources() -> list[VectorStoreSource]:
                 SUM(LENGTH(text)) AS chars,
                 MIN(id) AS first_id
             FROM vector_chunks
+            WHERE tenant_id = ?
             GROUP BY source
             ORDER BY source ASC
-            """
+            """, (tenant_id(),)
         ).fetchall()
 
         sources: list[VectorStoreSource] = []
         for row in rows:
             preview_row = conn.execute(
-                "SELECT text FROM vector_chunks WHERE id = ?",
-                (row["first_id"],),
+                "SELECT text FROM vector_chunks WHERE id = ? AND tenant_id = ?",
+                (row["first_id"], tenant_id()),
             ).fetchone()
             preview = (preview_row["text"] if preview_row else "").strip()
             sources.append(
@@ -1282,8 +1446,8 @@ def ensure_known_source(source: str | None) -> str | None:
 
     with sqlite3.connect(DB_PATH) as conn:
         found = conn.execute(
-            "SELECT 1 FROM vector_chunks WHERE source = ? LIMIT 1",
-            (normalized,),
+            "SELECT 1 FROM vector_chunks WHERE source = ? AND tenant_id = ? LIMIT 1",
+            (normalized, tenant_id()),
         ).fetchone()
     if not found:
         raise HTTPException(status_code=400, detail="Fonte PDF non trovata")
@@ -1291,12 +1455,17 @@ def ensure_known_source(source: str | None) -> str | None:
 
 
 def require_tool_secret(provided_secret: str | None) -> None:
-    config = get_elevenlabs_config_payload()
-    if not provided_secret or not hmac.compare_digest(
-        provided_secret,
-        config.tool_webhook_secret,
-    ):
-        raise HTTPException(status_code=401, detail="Webhook tool non autorizzato")
+    if provided_secret:
+        ensure_storage()
+        with sqlite3.connect(DB_PATH) as conn:
+            rows = conn.execute(
+                "SELECT tenant_id, tool_webhook_secret FROM tenant_configs"
+            ).fetchall()
+        for configured_tenant_id, configured_secret in rows:
+            if configured_secret and hmac.compare_digest(provided_secret, configured_secret):
+                CURRENT_TENANT_ID.set(configured_tenant_id)
+                return
+    raise HTTPException(status_code=401, detail="Webhook tool non autorizzato")
 
 
 def resolve_tool_source(
@@ -1310,8 +1479,8 @@ def resolve_tool_source(
     if conversation_id:
         with sqlite3.connect(DB_PATH) as conn:
             row = conn.execute(
-                "SELECT source FROM outbound_calls WHERE conversation_id = ?",
-                (conversation_id,),
+                "SELECT source FROM outbound_calls WHERE conversation_id = ? AND tenant_id = ?",
+                (conversation_id, tenant_id()),
             ).fetchone()
         if row and row[0]:
             return row[0]
@@ -1384,7 +1553,10 @@ def login(payload: LoginIn, response: Response) -> AuthUser:
     username = payload.username.strip().lower()
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        row = conn.execute(
+            "SELECT u.*, t.name AS tenant_name FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.username = ? AND t.is_active = 1",
+            (username,),
+        ).fetchone()
         if not row or not row["is_active"] or not verify_password(payload.password, row["password_hash"]):
             raise HTTPException(status_code=401, detail="Credenziali non valide")
         token = secrets.token_urlsafe(48)
@@ -1454,7 +1626,10 @@ def list_users(request: Request) -> list[AuthUser]:
     ensure_admin(request_user(request))
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM users ORDER BY role, username").fetchall()
+        rows = conn.execute(
+            "SELECT u.*, t.name AS tenant_name FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.tenant_id = ? AND u.is_superadmin = 0 ORDER BY role, username",
+            (tenant_id(),),
+        ).fetchall()
     return [row_to_auth_user(row) for row in rows]
 
 
@@ -1478,8 +1653,8 @@ def create_user(payload: UserCreateIn, request: Request) -> AuthUser:
                 """
                 INSERT INTO users (
                     username, password_hash, role, can_inbound, can_outbound,
-                    can_presentation, is_active, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    can_presentation, is_active, created_at, updated_at, tenant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 """,
                 (
                     username,
@@ -1488,10 +1663,14 @@ def create_user(payload: UserCreateIn, request: Request) -> AuthUser:
                     *permissions,
                     now,
                     now,
+                    tenant_id(),
                 ),
             )
             conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            row = conn.execute(
+                "SELECT u.*, t.name AS tenant_name FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
             conn.commit()
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="Username già esistente") from exc
@@ -1521,16 +1700,19 @@ def update_user(user_id: int, payload: UserUpdateIn, request: Request) -> AuthUs
                 UPDATE users
                 SET username = ?, role = ?, can_inbound = ?, can_outbound = ?,
                     can_presentation = ?, is_active = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND tenant_id = ? AND is_superadmin = 0
                 """,
-                (username, payload.role, *permissions, payload.is_active, utc_now(), user_id),
+                (username, payload.role, *permissions, payload.is_active, utc_now(), user_id, tenant_id()),
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Utente non trovato")
             if not payload.is_active:
                 conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
             conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            row = conn.execute(
+                "SELECT u.*, t.name AS tenant_name FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = ?",
+                (user_id,),
+            ).fetchone()
             conn.commit()
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="Username già esistente") from exc
@@ -1546,8 +1728,8 @@ def reset_user_password(
     ensure_admin(request_user(request))
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.execute(
-            "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
-            (hash_password(payload.password), utc_now(), user_id),
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND is_superadmin = 0",
+            (hash_password(payload.password), utc_now(), user_id, tenant_id()),
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Utente non trovato")
@@ -1564,10 +1746,114 @@ def delete_user(user_id: int, request: Request) -> dict[str, bool]:
         raise HTTPException(status_code=400, detail="Non puoi eliminare il tuo account")
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
-        cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        cursor = conn.execute(
+            "DELETE FROM users WHERE id = ? AND tenant_id = ? AND is_superadmin = 0",
+            (user_id, tenant_id()),
+        )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Utente non trovato")
         conn.commit()
+    return {"ok": True}
+
+
+def row_to_tenant(row: sqlite3.Row) -> Tenant:
+    return Tenant(
+        id=row["id"],
+        name=row["name"],
+        slug=row["slug"],
+        is_active=bool(row["is_active"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+@app.get("/api/tenants", response_model=list[Tenant])
+def list_tenants(request: Request) -> list[Tenant]:
+    ensure_superadmin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM tenants ORDER BY name COLLATE NOCASE").fetchall()
+    return [row_to_tenant(row) for row in rows]
+
+
+@app.post("/api/tenants", response_model=Tenant)
+def create_tenant(payload: TenantIn, request: Request) -> Tenant:
+    ensure_superadmin(request_user(request))
+    name = payload.name.strip()
+    slug = normalize_tenant_slug(payload.slug)
+    now = utc_now()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "INSERT INTO tenants (name, slug, is_active, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+                (name, slug, now, now),
+            )
+            new_tenant_id = cursor.lastrowid
+            conn.execute(
+                """
+                INSERT INTO tenant_configs (
+                    tenant_id, public_base_url, tool_webhook_secret, behavior,
+                    documentation, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_tenant_id,
+                    PUBLIC_BASE_URL,
+                    secrets.token_urlsafe(32),
+                    "Rispondi in italiano, in modo naturale, breve e professionale.",
+                    "",
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at, tenant_id)
+                VALUES ('Predefinito', ?, 1, ?, ?, ?)
+                """,
+                ("Rispondi in italiano, in modo naturale, breve e professionale.", now, now, new_tenant_id),
+            )
+            row = conn.execute("SELECT * FROM tenants WHERE id = ?", (new_tenant_id,)).fetchone()
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Slug tenant gia esistente") from exc
+    return row_to_tenant(row)
+
+
+@app.put("/api/tenants/{target_tenant_id}", response_model=Tenant)
+def update_tenant(target_tenant_id: int, payload: TenantIn, request: Request) -> Tenant:
+    ensure_superadmin(request_user(request))
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "UPDATE tenants SET name = ?, slug = ?, updated_at = ? WHERE id = ?",
+                (payload.name.strip(), normalize_tenant_slug(payload.slug), utc_now(), target_tenant_id),
+            )
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Tenant non trovato")
+            row = conn.execute("SELECT * FROM tenants WHERE id = ?", (target_tenant_id,)).fetchone()
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Slug tenant gia esistente") from exc
+    return row_to_tenant(row)
+
+
+@app.delete("/api/tenants/{target_tenant_id}")
+def deactivate_tenant(target_tenant_id: int, request: Request) -> dict[str, bool]:
+    actor = request_user(request)
+    ensure_superadmin(actor)
+    if target_tenant_id == actor.tenant_id:
+        raise HTTPException(status_code=400, detail="Non puoi disattivare il tenant del superadmin")
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            "UPDATE tenants SET is_active = 0, updated_at = ? WHERE id = ?",
+            (utc_now(), target_tenant_id),
+        )
+        conn.execute("DELETE FROM user_sessions WHERE user_id IN (SELECT id FROM users WHERE tenant_id = ?)", (target_tenant_id,))
+        conn.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Tenant non trovato")
     return {"ok": True}
 
 
@@ -1589,10 +1875,12 @@ def health() -> dict[str, Any]:
 @app.get("/api/knowledge")
 def get_knowledge() -> KnowledgePayload:
     ensure_storage()
-    return KnowledgePayload(
-        behavior=BEHAVIOR_PATH.read_text(encoding="utf-8"),
-        documentation=DOCUMENTATION_PATH.read_text(encoding="utf-8"),
-    )
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT behavior, documentation FROM tenant_configs WHERE tenant_id = ?",
+            (tenant_id(),),
+        ).fetchone()
+    return KnowledgePayload(behavior=row[0] if row else "", documentation=row[1] if row else "")
 
 
 @app.put("/api/knowledge")
@@ -1600,9 +1888,13 @@ def save_knowledge(payload: KnowledgePayload) -> KnowledgePayload:
     ensure_storage()
     behavior = payload.behavior.strip()
     documentation = payload.documentation.strip()
-    BEHAVIOR_PATH.write_text(behavior, encoding="utf-8")
     update_active_bot_behavior(behavior)
-    DOCUMENTATION_PATH.write_text(documentation, encoding="utf-8")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE tenant_configs SET behavior = ?, documentation = ?, updated_at = ? WHERE tenant_id = ?",
+            (behavior, documentation, utc_now(), tenant_id()),
+        )
+        conn.commit()
     return KnowledgePayload(behavior=behavior, documentation=documentation)
 
 
@@ -1610,11 +1902,16 @@ def save_knowledge(payload: KnowledgePayload) -> KnowledgePayload:
 def save_documentation(payload: DocumentationPayload) -> KnowledgePayload:
     ensure_storage()
     documentation = payload.documentation.strip()
-    DOCUMENTATION_PATH.write_text(documentation, encoding="utf-8")
-    return KnowledgePayload(
-        behavior=BEHAVIOR_PATH.read_text(encoding="utf-8"),
-        documentation=documentation,
-    )
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE tenant_configs SET documentation = ?, updated_at = ? WHERE tenant_id = ?",
+            (documentation, utc_now(), tenant_id()),
+        )
+        behavior = conn.execute(
+            "SELECT behavior FROM tenant_configs WHERE tenant_id = ?", (tenant_id(),)
+        ).fetchone()[0]
+        conn.commit()
+    return KnowledgePayload(behavior=behavior, documentation=documentation)
 
 
 @app.get("/api/behaviors", response_model=list[BotBehavior])
@@ -1630,21 +1927,23 @@ def create_bot_behavior(payload: BotBehaviorIn) -> BotBehavior:
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        conn.execute("UPDATE bot_behaviors SET is_active = 0")
+        conn.execute("UPDATE bot_behaviors SET is_active = 0 WHERE tenant_id = ?", (tenant_id(),))
         cursor = conn.execute(
             """
-            INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at)
-            VALUES (?, ?, 1, ?, ?)
+            INSERT INTO bot_behaviors (name, content, is_active, created_at, updated_at, tenant_id)
+            VALUES (?, ?, 1, ?, ?, ?)
             """,
-            (name, content, now, now),
+            (name, content, now, now, tenant_id()),
         )
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM bot_behaviors WHERE id = ?",
-            (cursor.lastrowid,),
+            "SELECT * FROM bot_behaviors WHERE id = ? AND tenant_id = ?",
+            (cursor.lastrowid, tenant_id()),
         ).fetchone()
 
-    BEHAVIOR_PATH.write_text(content, encoding="utf-8")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE tenant_configs SET behavior = ?, updated_at = ? WHERE tenant_id = ?", (content, now, tenant_id()))
+        conn.commit()
     return row_to_bot_behavior(row)
 
 
@@ -1657,8 +1956,8 @@ def update_bot_behavior(behavior_id: int, payload: BotBehaviorIn) -> BotBehavior
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM bot_behaviors WHERE id = ?",
-            (behavior_id,),
+            "SELECT * FROM bot_behaviors WHERE id = ? AND tenant_id = ?",
+            (behavior_id, tenant_id()),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Behavior not found")
@@ -1673,12 +1972,14 @@ def update_bot_behavior(behavior_id: int, payload: BotBehaviorIn) -> BotBehavior
         )
         conn.commit()
         updated = conn.execute(
-            "SELECT * FROM bot_behaviors WHERE id = ?",
-            (behavior_id,),
+            "SELECT * FROM bot_behaviors WHERE id = ? AND tenant_id = ?",
+            (behavior_id, tenant_id()),
         ).fetchone()
 
     if updated["is_active"]:
-        BEHAVIOR_PATH.write_text(content, encoding="utf-8")
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("UPDATE tenant_configs SET behavior = ?, updated_at = ? WHERE tenant_id = ?", (content, now, tenant_id()))
+            conn.commit()
     return row_to_bot_behavior(updated)
 
 
@@ -1688,14 +1989,14 @@ def activate_bot_behavior(behavior_id: int) -> BotBehavior:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM bot_behaviors WHERE id = ?",
-            (behavior_id,),
+            "SELECT * FROM bot_behaviors WHERE id = ? AND tenant_id = ?",
+            (behavior_id, tenant_id()),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Behavior not found")
 
         now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        conn.execute("UPDATE bot_behaviors SET is_active = 0")
+        conn.execute("UPDATE bot_behaviors SET is_active = 0 WHERE tenant_id = ?", (tenant_id(),))
         conn.execute(
             """
             UPDATE bot_behaviors
@@ -1706,11 +2007,13 @@ def activate_bot_behavior(behavior_id: int) -> BotBehavior:
         )
         conn.commit()
         active = conn.execute(
-            "SELECT * FROM bot_behaviors WHERE id = ?",
-            (behavior_id,),
+            "SELECT * FROM bot_behaviors WHERE id = ? AND tenant_id = ?",
+            (behavior_id, tenant_id()),
         ).fetchone()
 
-    BEHAVIOR_PATH.write_text(active["content"], encoding="utf-8")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE tenant_configs SET behavior = ?, updated_at = ? WHERE tenant_id = ?", (active["content"], utc_now(), tenant_id()))
+        conn.commit()
     return row_to_bot_behavior(active)
 
 
@@ -1728,8 +2031,9 @@ async def upload_pdf_knowledge(
         raise HTTPException(status_code=400, detail="PDF is too large")
 
     extracted_text, pages = extract_pdf_text(contents)
-    behavior = BEHAVIOR_PATH.read_text(encoding="utf-8").strip()
-    current_documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8").strip()
+    current = get_knowledge()
+    behavior = current.behavior.strip()
+    current_documentation = current.documentation.strip()
     title = file.filename or "documento.pdf"
     pdf_block = f"DOCUMENTO PDF: {title}\n\n{extracted_text}".strip()
 
@@ -1738,7 +2042,12 @@ async def upload_pdf_knowledge(
     else:
         documentation = f"{current_documentation}\n\n---\n\n{pdf_block}".strip()
 
-    DOCUMENTATION_PATH.write_text(documentation, encoding="utf-8")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE tenant_configs SET documentation = ?, updated_at = ? WHERE tenant_id = ?",
+            (documentation, utc_now(), tenant_id()),
+        )
+        conn.commit()
     return PdfKnowledgeResult(
         behavior=behavior,
         documentation=documentation,
@@ -1761,7 +2070,7 @@ def vector_store_sources() -> list[VectorStoreSource]:
 @app.post("/api/vector-store/documentation", response_model=VectorStoreStats)
 def index_documentation() -> VectorStoreStats:
     ensure_storage()
-    documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
+    documentation = get_knowledge().documentation
     index_vector_chunks("Documentazione manuale", documentation)
     return get_vector_store_stats()
 
@@ -1804,7 +2113,7 @@ def search_vector_store(
 
 def visible_elevenlabs_config(user: AuthUser) -> ElevenLabsConfig:
     config = get_elevenlabs_config_payload()
-    if user.role != "admin":
+    if user.role not in {"admin", "superadmin"}:
         return config.model_copy(
             update={
                 "api_key": "",
@@ -1827,11 +2136,9 @@ def save_elevenlabs_config(payload: ElevenLabsConfigIn) -> ElevenLabsConfig:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO elevenlabs_config (id, api_key, updated_at)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET api_key = excluded.api_key, updated_at = excluded.updated_at
+            UPDATE tenant_configs SET api_key = ?, updated_at = ? WHERE tenant_id = ?
             """,
-            (payload.api_key.strip(), now),
+            (payload.api_key.strip(), now, tenant_id()),
         )
         conn.commit()
 
@@ -1866,16 +2173,17 @@ def save_elevenlabs_defaults(payload: ElevenLabsDefaultsIn) -> ElevenLabsConfig:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            UPDATE elevenlabs_config
+            UPDATE tenant_configs
             SET inbound_agent_id = ?, outbound_agent_id = ?,
                 presentation_agent_id = ?, updated_at = ?
-            WHERE id = 1
+            WHERE tenant_id = ?
             """,
             (
                 defaults["inbound_agent_id"],
                 defaults["outbound_agent_id"],
                 defaults["presentation_agent_id"],
                 now,
+                tenant_id(),
             ),
         )
         conn.commit()
@@ -1890,14 +2198,15 @@ def save_elevenlabs_integration(payload: ElevenLabsIntegrationIn) -> ElevenLabsC
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            UPDATE elevenlabs_config
+            UPDATE tenant_configs
             SET public_base_url = ?, post_call_webhook_secret = ?, updated_at = ?
-            WHERE id = 1
+            WHERE tenant_id = ?
             """,
             (
                 public_base_url,
                 payload.post_call_webhook_secret.strip(),
                 utc_now(),
+                tenant_id(),
             ),
         )
         conn.commit()
@@ -1924,8 +2233,8 @@ def save_flow_source(payload: FlowSourceIn, request: Request) -> ElevenLabsConfi
     column_name = column_by_flow[payload.flow]
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            f"UPDATE elevenlabs_config SET {column_name} = ?, updated_at = ? WHERE id = 1",
-            (source, utc_now()),
+            f"UPDATE tenant_configs SET {column_name} = ?, updated_at = ? WHERE tenant_id = ?",
+            (source, utc_now(), tenant_id()),
         )
         conn.commit()
     return visible_elevenlabs_config(user)
@@ -1937,17 +2246,18 @@ def create_elevenlabs_agent(payload: ElevenLabsAgentIn) -> ElevenLabsAgent:
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        agents_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_agents").fetchone()[0]
+        agents_count = conn.execute("SELECT COUNT(*) FROM elevenlabs_agents WHERE tenant_id = ?", (tenant_id(),)).fetchone()[0]
         cursor = conn.execute(
             """
-            INSERT INTO elevenlabs_agents (name, agent_id, is_active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO elevenlabs_agents (name, agent_id, is_active, created_at, updated_at, tenant_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.name.strip(),
                 payload.agent_id.strip(),
                 1 if agents_count == 0 else 0,
                 now,
+                tenant_id(),
                 now,
             ),
         )
@@ -1970,8 +2280,8 @@ def update_elevenlabs_agent(
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM elevenlabs_agents WHERE id = ?",
-            (agent_row_id,),
+            "SELECT * FROM elevenlabs_agents WHERE id = ? AND tenant_id = ?",
+            (agent_row_id, tenant_id()),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Agent not found")
@@ -1992,13 +2302,13 @@ def update_elevenlabs_agent(
             "presentation_agent_id",
         ):
             conn.execute(
-                f"UPDATE elevenlabs_config SET {column_name} = ? WHERE {column_name} = ?",
-                (new_agent_id, old_agent_id),
+                f"UPDATE tenant_configs SET {column_name} = ? WHERE {column_name} = ? AND tenant_id = ?",
+                (new_agent_id, old_agent_id, tenant_id()),
             )
         conn.commit()
         updated = conn.execute(
-            "SELECT * FROM elevenlabs_agents WHERE id = ?",
-            (agent_row_id,),
+            "SELECT * FROM elevenlabs_agents WHERE id = ? AND tenant_id = ?",
+            (agent_row_id, tenant_id()),
         ).fetchone()
 
     return row_to_elevenlabs_agent(updated)
@@ -2011,13 +2321,13 @@ def activate_elevenlabs_agent(agent_row_id: int) -> ElevenLabsAgent:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM elevenlabs_agents WHERE id = ?",
-            (agent_row_id,),
+            "SELECT * FROM elevenlabs_agents WHERE id = ? AND tenant_id = ?",
+            (agent_row_id, tenant_id()),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        conn.execute("UPDATE elevenlabs_agents SET is_active = 0")
+        conn.execute("UPDATE elevenlabs_agents SET is_active = 0 WHERE tenant_id = ?", (tenant_id(),))
         conn.execute(
             """
             UPDATE elevenlabs_agents
@@ -2028,8 +2338,8 @@ def activate_elevenlabs_agent(agent_row_id: int) -> ElevenLabsAgent:
         )
         conn.commit()
         active = conn.execute(
-            "SELECT * FROM elevenlabs_agents WHERE id = ?",
-            (agent_row_id,),
+            "SELECT * FROM elevenlabs_agents WHERE id = ? AND tenant_id = ?",
+            (agent_row_id, tenant_id()),
         ).fetchone()
 
     return row_to_elevenlabs_agent(active)
@@ -2041,27 +2351,28 @@ def delete_elevenlabs_agent(agent_row_id: int) -> ElevenLabsConfig:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM elevenlabs_agents WHERE id = ?",
-            (agent_row_id,),
+            "SELECT * FROM elevenlabs_agents WHERE id = ? AND tenant_id = ?",
+            (agent_row_id, tenant_id()),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Agent not found")
 
         was_active = bool(row["is_active"])
         deleted_agent_id = row["agent_id"]
-        conn.execute("DELETE FROM elevenlabs_agents WHERE id = ?", (agent_row_id,))
+        conn.execute("DELETE FROM elevenlabs_agents WHERE id = ? AND tenant_id = ?", (agent_row_id, tenant_id()))
         for column_name in (
             "inbound_agent_id",
             "outbound_agent_id",
             "presentation_agent_id",
         ):
             conn.execute(
-                f"UPDATE elevenlabs_config SET {column_name} = NULL WHERE {column_name} = ?",
-                (deleted_agent_id,),
+                f"UPDATE tenant_configs SET {column_name} = NULL WHERE {column_name} = ? AND tenant_id = ?",
+                (deleted_agent_id, tenant_id()),
             )
         if was_active:
             replacement = conn.execute(
-                "SELECT id FROM elevenlabs_agents ORDER BY updated_at DESC, id DESC LIMIT 1"
+                "SELECT id FROM elevenlabs_agents WHERE tenant_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+                (tenant_id(),),
             ).fetchone()
             if replacement:
                 conn.execute(
@@ -2149,7 +2460,7 @@ async def list_elevenlabs_phone_numbers() -> list[ElevenLabsPhoneNumber]:
     headers = {"xi-api-key": api_key}
     params = {"provider": "twilio", "supports_outbound": "true", "page_size": 100}
     try:
-        async with httpx.AsyncClient(timeout=20, verify=ELEVENLABS_VERIFY_SSL) as client:
+        async with httpx.AsyncClient(timeout=60, verify=ELEVENLABS_VERIFY_SSL) as client:
             response = await client.get(url, headers=headers, params=params)
     except httpx.RequestError as exc:
         raise HTTPException(
@@ -2203,8 +2514,8 @@ async def initiate_outbound_call(
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         contact = conn.execute(
-            "SELECT * FROM outbound_contacts WHERE id = ?",
-            (payload.contact_id,),
+            "SELECT * FROM outbound_contacts WHERE id = ? AND tenant_id = ?",
+            (payload.contact_id, tenant_id()),
         ).fetchone()
     if not contact:
         raise HTTPException(status_code=404, detail="Contatto non trovato")
@@ -2229,7 +2540,8 @@ async def initiate_outbound_call(
                     contact_id, reference, phone, agent_id, agent_phone_number_id,
                     source, status, transcript_text, error, created_at, updated_at,
                     campaign_id, campaign_item_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?)
+                    , tenant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.contact_id,
@@ -2243,6 +2555,7 @@ async def initiate_outbound_call(
                     now,
                     campaign_id,
                     campaign_item_id,
+                    tenant_id(),
                 ),
             )
             conn.commit()
@@ -2258,7 +2571,8 @@ async def initiate_outbound_call(
                     contact_id, reference, phone, agent_id, agent_phone_number_id,
                     source, status, transcript_text, error, created_at, updated_at,
                     campaign_id, campaign_item_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?)
+                    , tenant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.contact_id,
@@ -2272,6 +2586,7 @@ async def initiate_outbound_call(
                     now,
                     campaign_id,
                     campaign_item_id,
+                    tenant_id(),
                 ),
             )
             conn.commit()
@@ -2285,7 +2600,8 @@ async def initiate_outbound_call(
                 contact_id, reference, phone, agent_id, agent_phone_number_id,
                 source, conversation_id, call_sid, status, transcript_text,
                 created_at, updated_at, campaign_id, campaign_item_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'initiated', '', ?, ?, ?, ?)
+                , tenant_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'initiated', '', ?, ?, ?, ?, ?)
             """,
             (
                 payload.contact_id,
@@ -2300,12 +2616,13 @@ async def initiate_outbound_call(
                 now,
                 campaign_id,
                 campaign_item_id,
+                tenant_id(),
             ),
         )
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM outbound_calls WHERE id = ?",
-            (cursor.lastrowid,),
+            "SELECT * FROM outbound_calls WHERE id = ? AND tenant_id = ?",
+            (cursor.lastrowid, tenant_id()),
         ).fetchone()
     return row_to_outbound_call(row)
 
@@ -2321,7 +2638,7 @@ async def advance_outbound_campaign(campaign_id: int) -> None:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             campaign = conn.execute(
-                "SELECT * FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+                "SELECT * FROM outbound_campaigns WHERE id = ? AND tenant_id = ?", (campaign_id, tenant_id())
             ).fetchone()
             if not campaign or campaign["status"] not in {"queued", "running"}:
                 return
@@ -2523,14 +2840,14 @@ async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampa
         active = conn.execute(
             """
             SELECT id FROM outbound_campaigns
-            WHERE status IN ('queued', 'running') LIMIT 1
-            """
+            WHERE status IN ('queued', 'running') AND tenant_id = ? LIMIT 1
+            """, (tenant_id(),)
         ).fetchone()
         if active:
             raise HTTPException(status_code=409, detail="Esiste gia una campagna in corso")
         rows = conn.execute(
-            f"SELECT * FROM outbound_contacts WHERE id IN ({placeholders})",
-            payload.contact_ids,
+            f"SELECT * FROM outbound_contacts WHERE id IN ({placeholders}) AND tenant_id = ?",
+            [*payload.contact_ids, tenant_id()],
         ).fetchall()
         contacts_by_id = {row["id"]: row for row in rows}
         if len(contacts_by_id) != len(payload.contact_ids):
@@ -2540,7 +2857,8 @@ async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampa
             INSERT INTO outbound_campaigns (
                 status, total_count, agent_id, agent_phone_number_id, source,
                 created_at, updated_at
-            ) VALUES ('queued', ?, ?, ?, ?, ?, ?)
+                , tenant_id
+            ) VALUES ('queued', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 len(payload.contact_ids),
@@ -2549,6 +2867,7 @@ async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampa
                 source,
                 now,
                 now,
+                tenant_id(),
             ),
         )
         campaign_id = cursor.lastrowid
@@ -2558,7 +2877,8 @@ async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampa
                 """
                 INSERT INTO outbound_campaign_items (
                     campaign_id, position, contact_id, reference, phone, status
-                ) VALUES (?, ?, ?, ?, ?, 'pending')
+                    , tenant_id
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
                     campaign_id,
@@ -2566,6 +2886,7 @@ async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampa
                     contact_id,
                     contact["reference"],
                     contact["phone"],
+                    tenant_id(),
                 ),
             )
         conn.commit()
@@ -2578,7 +2899,8 @@ async def latest_outbound_campaign() -> OutboundCampaign | None:
     ensure_storage()
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT id FROM outbound_campaigns ORDER BY id DESC LIMIT 1"
+            "SELECT id FROM outbound_campaigns WHERE tenant_id = ? ORDER BY id DESC LIMIT 1",
+            (tenant_id(),),
         ).fetchone()
     if not row:
         return None
@@ -2589,12 +2911,23 @@ async def latest_outbound_campaign() -> OutboundCampaign | None:
     return campaign
 
 
+@app.get("/api/outbound-campaigns", response_model=list[OutboundCampaign])
+def list_outbound_campaigns() -> list[OutboundCampaign]:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id FROM outbound_campaigns WHERE tenant_id = ? ORDER BY id DESC LIMIT 50",
+            (tenant_id(),),
+        ).fetchall()
+    return [get_outbound_campaign(row[0]) for row in rows]
+
+
 @app.post("/api/outbound-campaigns/{campaign_id}/cancel", response_model=OutboundCampaign)
 def cancel_outbound_campaign(campaign_id: int) -> OutboundCampaign:
     now = utc_now()
     with sqlite3.connect(DB_PATH) as conn:
         found = conn.execute(
-            "SELECT status FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+            "SELECT status FROM outbound_campaigns WHERE id = ? AND tenant_id = ?", (campaign_id, tenant_id())
         ).fetchone()
         if not found:
             raise HTTPException(status_code=404, detail="Campagna non trovata")
@@ -2623,7 +2956,7 @@ def delete_outbound_campaign(campaign_id: int) -> dict[str, int]:
     ensure_storage()
     with sqlite3.connect(DB_PATH) as conn:
         found = conn.execute(
-            "SELECT id FROM outbound_campaigns WHERE id = ?", (campaign_id,)
+            "SELECT id FROM outbound_campaigns WHERE id = ? AND tenant_id = ?", (campaign_id, tenant_id())
         ).fetchone()
         if not found:
             raise HTTPException(status_code=404, detail="Campagna non trovata")
@@ -2652,7 +2985,8 @@ def list_outbound_calls() -> list[OutboundCall]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM outbound_calls ORDER BY created_at DESC, id DESC LIMIT 100"
+            "SELECT * FROM outbound_calls WHERE tenant_id = ? ORDER BY created_at DESC, id DESC LIMIT 100",
+            (tenant_id(),),
         ).fetchall()
     return [row_to_outbound_call(row) for row in rows]
 
@@ -2661,7 +2995,7 @@ def list_outbound_calls() -> list[OutboundCall]:
 def delete_all_outbound_calls() -> dict[str, int]:
     ensure_storage()
     with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute("DELETE FROM outbound_calls")
+        cursor = conn.execute("DELETE FROM outbound_calls WHERE tenant_id = ?", (tenant_id(),))
         conn.commit()
     return {"deleted": cursor.rowcount}
 
@@ -2673,8 +3007,8 @@ def insert_appointment(payload: AppointmentIn) -> Appointment:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             """
-            INSERT INTO appointments (customer_name, phone, date, time, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO appointments (customer_name, phone, date, time, notes, created_at, tenant_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.customer_name.strip(),
@@ -2683,6 +3017,7 @@ def insert_appointment(payload: AppointmentIn) -> Appointment:
                 payload.time.strip(),
                 payload.notes.strip() if payload.notes else None,
                 created_at,
+                tenant_id(),
             ),
         )
         conn.commit()
@@ -2704,7 +3039,8 @@ def list_appointments() -> list[Appointment]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM appointments ORDER BY date ASC, time ASC, id DESC"
+            "SELECT * FROM appointments WHERE tenant_id = ? ORDER BY date ASC, time ASC, id DESC",
+            (tenant_id(),),
         ).fetchall()
     return [row_to_appointment(row) for row in rows]
 
@@ -2713,7 +3049,7 @@ def list_appointments() -> list[Appointment]:
 def delete_all_appointments() -> dict[str, int]:
     ensure_storage()
     with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute("DELETE FROM appointments")
+        cursor = conn.execute("DELETE FROM appointments WHERE tenant_id = ?", (tenant_id(),))
         conn.commit()
     return {"deleted": cursor.rowcount}
 
@@ -2724,7 +3060,8 @@ def list_outbound_contacts() -> list[OutboundContact]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM outbound_contacts ORDER BY reference COLLATE NOCASE, id"
+            "SELECT * FROM outbound_contacts WHERE tenant_id = ? ORDER BY reference COLLATE NOCASE, id",
+            (tenant_id(),),
         ).fetchall()
     return [row_to_outbound_contact(row) for row in rows]
 
@@ -2737,10 +3074,10 @@ def create_outbound_contact(payload: OutboundContactIn) -> OutboundContact:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             """
-            INSERT INTO outbound_contacts (reference, phone, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO outbound_contacts (reference, phone, created_at, updated_at, tenant_id)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (payload.reference.strip(), payload.phone.strip(), now, now),
+            (payload.reference.strip(), normalize_phone_number(payload.phone), now, now, tenant_id()),
         )
         conn.commit()
         row = conn.execute(
@@ -2748,6 +3085,70 @@ def create_outbound_contact(payload: OutboundContactIn) -> OutboundContact:
             (cursor.lastrowid,),
         ).fetchone()
     return row_to_outbound_contact(row)
+
+
+@app.post("/api/outbound-contacts/import", response_model=ContactImportResult)
+async def import_outbound_contacts(file: UploadFile = File(...)) -> ContactImportResult:
+    ensure_storage()
+    contents = await file.read()
+    if len(contents) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="CSV troppo grande")
+    try:
+        decoded = contents.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        try:
+            decoded = contents.decode("latin-1")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(status_code=400, detail="Codifica CSV non supportata") from exc
+    try:
+        dialect = csv.Sniffer().sniff(decoded[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.DictReader(StringIO(decoded), dialect=dialect)
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="Il CSV non contiene intestazioni")
+    aliases = {str(name).strip().lower(): name for name in reader.fieldnames}
+    reference_key = next((aliases[key] for key in ("riferimento", "reference", "nome", "name", "ragione sociale") if key in aliases), None)
+    phone_key = next((aliases[key] for key in ("telefono", "phone", "numero", "cellulare") if key in aliases), None)
+    if not reference_key or not phone_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Servono le colonne riferimento (o nome) e telefono",
+        )
+    imported = 0
+    skipped = 0
+    errors: list[str] = []
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        existing = {
+            row[0] for row in conn.execute(
+                "SELECT phone FROM outbound_contacts WHERE tenant_id = ?", (tenant_id(),)
+            ).fetchall()
+        }
+        for line_number, row in enumerate(reader, start=2):
+            reference = str(row.get(reference_key) or "").strip()
+            raw_phone = str(row.get(phone_key) or "").strip()
+            if not reference or not raw_phone:
+                skipped += 1
+                errors.append(f"Riga {line_number}: riferimento o telefono mancante")
+                continue
+            try:
+                phone = normalize_phone_number(raw_phone)
+            except HTTPException as exc:
+                skipped += 1
+                errors.append(f"Riga {line_number}: {exc.detail}")
+                continue
+            if phone in existing:
+                skipped += 1
+                continue
+            conn.execute(
+                "INSERT INTO outbound_contacts (reference, phone, created_at, updated_at, tenant_id) VALUES (?, ?, ?, ?, ?)",
+                (reference[:160], phone, now, now, tenant_id()),
+            )
+            existing.add(phone)
+            imported += 1
+        conn.commit()
+    return ContactImportResult(imported=imported, skipped=skipped, errors=errors[:50])
 
 
 @app.put("/api/outbound-contacts/{contact_id}", response_model=OutboundContact)
@@ -2760,8 +3161,8 @@ def update_outbound_contact(
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT id FROM outbound_contacts WHERE id = ?",
-            (contact_id,),
+            "SELECT id FROM outbound_contacts WHERE id = ? AND tenant_id = ?",
+            (contact_id, tenant_id()),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Contatto non trovato")
@@ -2772,12 +3173,12 @@ def update_outbound_contact(
             SET reference = ?, phone = ?, updated_at = ?
             WHERE id = ?
             """,
-            (payload.reference.strip(), payload.phone.strip(), now, contact_id),
+            (payload.reference.strip(), normalize_phone_number(payload.phone), now, contact_id),
         )
         conn.commit()
         updated = conn.execute(
-            "SELECT * FROM outbound_contacts WHERE id = ?",
-            (contact_id,),
+            "SELECT * FROM outbound_contacts WHERE id = ? AND tenant_id = ?",
+            (contact_id, tenant_id()),
         ).fetchone()
     return row_to_outbound_contact(updated)
 
@@ -2787,8 +3188,8 @@ def delete_outbound_contact(contact_id: int) -> dict[str, int]:
     ensure_storage()
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.execute(
-            "DELETE FROM outbound_contacts WHERE id = ?",
-            (contact_id,),
+            "DELETE FROM outbound_contacts WHERE id = ? AND tenant_id = ?",
+            (contact_id, tenant_id()),
         )
         conn.commit()
     if cursor.rowcount == 0:
@@ -2876,12 +3277,22 @@ def webhook_phone_details(data: dict[str, Any]) -> tuple[str, str | None]:
 async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
     ensure_storage()
     raw_body = await request.body()
-    config = get_elevenlabs_config_payload()
-    verify_elevenlabs_signature(
-        raw_body,
-        request.headers.get("ElevenLabs-Signature"),
-        config.post_call_webhook_secret,
-    )
+    signature = request.headers.get("ElevenLabs-Signature")
+    matched_tenant_id: int | None = None
+    with sqlite3.connect(DB_PATH) as conn:
+        secrets_by_tenant = conn.execute(
+            "SELECT tenant_id, post_call_webhook_secret FROM tenant_configs"
+        ).fetchall()
+    for configured_tenant_id, configured_secret in secrets_by_tenant:
+        try:
+            verify_elevenlabs_signature(raw_body, signature, configured_secret)
+            matched_tenant_id = configured_tenant_id
+            break
+        except HTTPException:
+            continue
+    if matched_tenant_id is None:
+        raise HTTPException(status_code=401, detail="Firma ElevenLabs non valida")
+    CURRENT_TENANT_ID.set(matched_tenant_id)
     try:
         event = json.loads(raw_body)
     except json.JSONDecodeError as exc:
@@ -2976,8 +3387,8 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
                 INSERT INTO outbound_calls (
                     contact_id, reference, phone, agent_id, agent_phone_number_id,
                     source, conversation_id, call_sid, status, transcript_json,
-                    transcript_text, error, created_at, updated_at, completed_at
-                ) VALUES (NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    transcript_text, error, created_at, updated_at, completed_at, tenant_id
+                ) VALUES (NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent_name,
@@ -2992,6 +3403,7 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
                     now,
                     now,
                     completed_at,
+                    tenant_id(),
                 ),
             )
         conn.commit()

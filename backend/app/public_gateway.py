@@ -18,7 +18,7 @@ PUBLIC_ROUTES = {
 }
 
 public_app = FastAPI(
-    title="CP DEMO Webhook Gateway",
+    title="CP AGENT Webhook Gateway",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -49,7 +49,7 @@ async def forward_request(path: str, request: Request) -> Response:
                 headers=headers,
             )
     except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail="Backend CP DEMO non raggiungibile") from exc
+        raise HTTPException(status_code=502, detail="Backend CP AGENT non raggiungibile") from exc
 
     return Response(
         content=upstream.content,

@@ -1,4 +1,4 @@
-# CP DEMO
+# CP AGENT
 
 Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 
@@ -196,6 +196,19 @@ Se `APP_URL` cambia, il backend aggiorna il valore persistito al riavvio.
 Il tunnel è facoltativo: lasciando vuoto `CLOUDFLARE_TUNNEL_TOKEN`, Compose avvia
 solo applicazione e gateway per l'uso dietro un reverse proxy tradizionale.
 
+### Tenant e anagrafiche
+
+L'utente `admin` esistente viene promosso automaticamente a superadmin senza
+perdere i dati presenti, che vengono assegnati al `Tenant principale`. Dal menu
+`Tenant` il superadmin crea un'azienda, apre il relativo ambiente e da `Utenti`
+crea il primo amministratore. Agenti, chiavi, webhook, documenti, appuntamenti,
+anagrafiche, campagne e trascrizioni sono separati per tenant.
+
+L'importazione anagrafiche accetta CSV UTF-8 o Latin-1, con separatore virgola,
+punto e virgola o tab. Sono richieste le colonne `riferimento` (sono accettati
+anche `nome` e `reference`) e `telefono`; numeri duplicati o non validi vengono
+segnalati nel riepilogo.
+
 ### Aggiornamenti
 
 Dopo il primo deploy puoi aggiornare con:
@@ -225,7 +238,7 @@ docker compose --env-file .env.production restart
 Prima di aggiornamenti importanti, salva l'intera cartella persistente:
 
 ```bash
-tar -czf cp-demo-data-$(date +%F-%H%M).tar.gz server-data/
+tar -czf cp-agent-data-$(date +%F-%H%M).tar.gz server-data/
 ```
 
 Non eseguire più repliche del backend sullo stesso file SQLite. Per scalare su più

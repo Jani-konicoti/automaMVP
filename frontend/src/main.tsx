@@ -12,10 +12,12 @@ import {
   ArrowUp,
   ArrowUpDown,
   BookOpen,
+  Building2,
   CalendarClock,
   Check,
   Circle,
   Database,
+  FileUp,
   KeyRound,
   Loader2,
   LogOut,
@@ -44,6 +46,7 @@ import {
   Appointment,
   AppointmentInput,
   AuthUser,
+  Tenant,
   ElevenLabsAgent,
   ElevenLabsAgentInput,
   ElevenLabsConfig,
@@ -65,6 +68,7 @@ import {
   createOutboundContact,
   createOutboundCampaign,
   createUser,
+  createTenant,
   deleteAllAppointments,
   deleteAllOutboundCalls,
   deleteOutboundCampaign,
@@ -81,8 +85,10 @@ import {
   listAppointments,
   listElevenLabsPhoneNumbers,
   listOutboundCalls,
+  listOutboundCampaigns,
   listOutboundContacts,
   listUsers,
+  listTenants,
   login,
   logout,
   resetUserPassword,
@@ -96,6 +102,7 @@ import {
   updateOutboundContact,
   updateUser,
   uploadVectorStorePdf,
+  importOutboundContacts,
 } from "./api";
 import "./styles.css";
 
@@ -104,15 +111,15 @@ type RetrievalQuery = {
   text: string;
 };
 
-type AppView = "demo" | "config" | "users";
+type AppView = "demo" | "config" | "users" | "tenants";
 type MainTab = "centralino-entrata" | "centralino-uscita" | "presentazione";
 type VoiceContext = MainTab;
-type NavigationPage = MainTab | "config" | "users";
+type NavigationPage = MainTab | "config" | "users" | "tenants";
 type OutboundSection = "operations" | "test" | "sources" | "appointments" | "events";
 
 function navigationPageFromHash(): NavigationPage {
   const page = window.location.hash.replace(/^#/, "");
-  return page === "centralino-uscita" || page === "presentazione" || page === "config" || page === "users"
+  return page === "centralino-uscita" || page === "presentazione" || page === "config" || page === "users" || page === "tenants"
     ? page
     : "centralino-entrata";
 }
@@ -121,14 +128,15 @@ function firstAllowedPage(user: AuthUser): NavigationPage {
   if (user.can_inbound) return "centralino-entrata";
   if (user.can_outbound) return "centralino-uscita";
   if (user.can_presentation) return "presentazione";
-  return user.role === "admin" ? "config" : "centralino-entrata";
+  return user.role === "admin" || user.role === "superadmin" ? "config" : "centralino-entrata";
 }
 
 function canAccessPage(user: AuthUser, page: NavigationPage) {
   if (page === "centralino-entrata") return user.can_inbound;
   if (page === "centralino-uscita") return user.can_outbound;
   if (page === "presentazione") return user.can_presentation;
-  return user.role === "admin";
+  if (page === "tenants") return user.role === "superadmin";
+  return user.role === "admin" || user.role === "superadmin";
 }
 
 function preferredAgentId(agents: ElevenLabsAgent[], pattern: RegExp) {
@@ -257,7 +265,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
     ? navigationPageFromHash()
     : firstAllowedPage(currentUser);
   const [appView, setAppView] = useState<AppView>(() =>
-    initialPage === "config" ? "config" : initialPage === "users" ? "users" : "demo",
+    initialPage === "config" ? "config" : initialPage === "users" ? "users" : initialPage === "tenants" ? "tenants" : "demo",
   );
   const [elevenLabsConfig, setElevenLabsConfig] = useState<ElevenLabsConfig>({
     api_key: "",
@@ -708,6 +716,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         onSaveElevenLabsIntegration={handleSaveElevenLabsIntegration}
         onStartOutboundCall={handleStartOutboundCall}
         onRefreshOutboundCalls={refreshOutboundCalls}
+        onRefreshOutboundContacts={refreshOutboundContacts}
         onRefreshPhoneNumbers={refreshPhoneNumbers}
         onUpdateElevenLabsAgent={handleUpdateElevenLabsAgent}
         onUpdateOutboundContact={handleUpdateOutboundContact}
@@ -782,6 +791,7 @@ type ShellProps = {
     source: string | null,
   ) => Promise<void>;
   onRefreshOutboundCalls: () => Promise<void>;
+  onRefreshOutboundContacts: () => Promise<void>;
   onRefreshPhoneNumbers: () => Promise<void>;
   onUpdateElevenLabsAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
   onUpdateOutboundContact: (id: number, input: OutboundContactInput) => Promise<void>;
@@ -829,6 +839,7 @@ function Shell({
   onSaveElevenLabsIntegration,
   onStartOutboundCall,
   onRefreshOutboundCalls,
+  onRefreshOutboundContacts,
   onRefreshPhoneNumbers,
   onUpdateElevenLabsAgent,
   onUpdateOutboundContact,
@@ -841,13 +852,24 @@ function Shell({
 }: ShellProps) {
   const [mainTab, setMainTab] = useState<MainTab>(() => {
     const page = navigationPageFromHash();
-    return page === "config" || page === "users" ? firstAllowedPage(currentUser) as MainTab : page;
+    return page === "config" || page === "users" || page === "tenants" ? firstAllowedPage(currentUser) as MainTab : page;
   });
   const [isNavigationOpen, setIsNavigationOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
   const [inboundAgentId, setInboundAgentId] = useState<string | null>(null);
   const [outboundAgentId, setOutboundAgentId] = useState<string | null>(null);
   const [presentationAgentId, setPresentationAgentId] = useState<string | null>(null);
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+
+  useEffect(() => {
+    if (currentUser.role !== "superadmin") return;
+    void listTenants().then((rows) => {
+      setTenants(rows);
+      if (!localStorage.getItem("cp-agent-tenant-id")) {
+        localStorage.setItem("cp-agent-tenant-id", String(currentUser.tenant_id));
+      }
+    }).catch((err) => onSetError(err instanceof Error ? err.message : "Caricamento tenant fallito"));
+  }, [currentUser, onSetError]);
 
   useEffect(() => {
     const hasAgent = (agentId: string | null) =>
@@ -881,7 +903,7 @@ function Shell({
     elevenLabsConfig.presentation_agent_id,
   ]);
 
-  const activePage: NavigationPage = appView === "config" ? "config" : appView === "users" ? "users" : mainTab;
+  const activePage: NavigationPage = appView === "config" ? "config" : appView === "users" ? "users" : appView === "tenants" ? "tenants" : mainTab;
   const pageDetails =
     activePage === "centralino-entrata"
       ? { eyebrow: "Centralino", title: "Chiamate in entrata", description: "Gestione agente, fonti e appuntamenti" }
@@ -891,6 +913,8 @@ function Shell({
           ? { eyebrow: "Presentazione", title: "Presentazione commerciale", description: "Sessioni guidate sulle fonti selezionate" }
           : activePage === "users"
             ? { eyebrow: "Amministrazione", title: "Utenti e accessi", description: "Ruoli, moduli e credenziali" }
+            : activePage === "tenants"
+              ? { eyebrow: "Superadmin", title: "Tenant", description: "Aziende, ambienti e configurazioni isolate" }
             : { eyebrow: "Sistema", title: "Configurazione", description: "Agenti, credenziali e integrazioni" };
 
   const navigateTo = (page: NavigationPage) => {
@@ -899,6 +923,8 @@ function Shell({
       onAppViewChange("config");
     } else if (page === "users") {
       onAppViewChange("users");
+    } else if (page === "tenants") {
+      onAppViewChange("tenants");
     } else {
       setMainTab(page);
       onAppViewChange("demo");
@@ -918,6 +944,8 @@ function Shell({
         onAppViewChange("config");
       } else if (page === "users") {
         onAppViewChange("users");
+      } else if (page === "tenants") {
+        onAppViewChange("tenants");
       } else {
         setMainTab(page);
         onAppViewChange("demo");
@@ -934,7 +962,7 @@ function Shell({
         <div className="sidebar-brand">
           <img className="sidebar-brand-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
           <div>
-            <strong>CP DEMO</strong>
+            <strong>CP AGENT</strong>
             <span>Centro Paghe</span>
           </div>
           <button
@@ -959,7 +987,10 @@ function Shell({
             <Presentation size={18} /><span>Presentazione</span>
           </button>}
 
-          {currentUser.role === "admin" && <><p>Amministrazione</p>
+          {(currentUser.role === "admin" || currentUser.role === "superadmin") && <><p>Amministrazione</p>
+            {currentUser.role === "superadmin" && <button className={activePage === "tenants" ? "active" : ""} type="button" onClick={() => navigateTo("tenants")}>
+              <Building2 size={18} /><span>Tenant</span>
+            </button>}
             <button className={activePage === "users" ? "active" : ""} type="button" onClick={() => navigateTo("users")}>
               <UserCog size={18} /><span>Utenti</span>
             </button>
@@ -969,7 +1000,8 @@ function Shell({
         </nav>
 
         <div className="sidebar-footer">
-          <div className="sidebar-user"><strong>{currentUser.username}</strong><span>{currentUser.role === "admin" ? "Amministratore" : "Utente"}</span></div>
+          {currentUser.role === "superadmin" && <label className="tenant-switcher"><span>Tenant attivo</span><select value={localStorage.getItem("cp-agent-tenant-id") ?? String(currentUser.tenant_id)} onChange={(event) => { localStorage.setItem("cp-agent-tenant-id", event.target.value); window.location.reload(); }}>{tenants.filter((tenant) => tenant.is_active).map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select></label>}
+          <div className="sidebar-user"><strong>{currentUser.username}</strong><span>{currentUser.role === "superadmin" ? "Superadmin" : currentUser.role === "admin" ? "Amministratore" : "Utente"}</span></div>
           <div className="sidebar-account-actions">
             <button title="Cambia password" type="button" onClick={() => setIsPasswordModalOpen(true)}><KeyRound size={17} /></button>
             <button title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button>
@@ -1032,6 +1064,8 @@ function Shell({
           />
         ) : appView === "users" ? (
           <UsersPage currentUser={currentUser} onSetError={onSetError} />
+        ) : appView === "tenants" ? (
+          <TenantsPage currentUser={currentUser} onSetError={onSetError} />
         ) : (
           <section className="main-workspace">
             {mainTab === "centralino-entrata" ? (
@@ -1077,6 +1111,7 @@ function Shell({
                 onSetError={onSetError}
                 onStartOutboundCall={onStartOutboundCall}
                 onRefreshOutboundCalls={onRefreshOutboundCalls}
+                onRefreshOutboundContacts={onRefreshOutboundContacts}
                 onRefreshPhoneNumbers={onRefreshPhoneNumbers}
                 onVectorPdfUpload={onVectorPdfUpload}
                 onVectorSourceChange={onOutboundVectorSourceChange}
@@ -1171,6 +1206,46 @@ const emptyUserInput: UserCreateInput = {
   can_presentation: false,
 };
 
+function TenantsPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetError: (value: string | null) => void }) {
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [isOpen, setIsOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+  const [isBusy, setIsBusy] = useState(false);
+  const refresh = useCallback(async () => setTenants(await listTenants()), []);
+  useEffect(() => { void refresh().catch((err) => onSetError(err instanceof Error ? err.message : "Caricamento tenant fallito")); }, [onSetError, refresh]);
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setIsBusy(true);
+    try {
+      await createTenant({ name: name.trim(), slug: slug.trim() });
+      await refresh();
+      setName("");
+      setSlug("");
+      setIsOpen(false);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Creazione tenant fallita");
+    } finally { setIsBusy(false); }
+  };
+  return <section className="users-workspace">
+    <div className="workspace-panel users-panel">
+      <div className="panel-heading"><div><p className="eyebrow">Organizzazioni</p><h2>Tenant</h2></div><button className="small-button primary" type="button" onClick={() => setIsOpen(true)}><Plus size={16} />Nuovo tenant</button></div>
+      <div className="tenant-grid">
+        {tenants.map((tenant) => <article className={`tenant-card ${tenant.is_active ? "" : "inactive"}`} key={tenant.id}>
+          <span className="tenant-icon"><Building2 size={20} /></span>
+          <div><strong>{tenant.name}</strong><small>{tenant.slug}</small></div>
+          <span className="tenant-status">{tenant.is_active ? "Attivo" : "Disattivato"}</span>
+          <button className="small-button" disabled={!tenant.is_active} type="button" onClick={() => { localStorage.setItem("cp-agent-tenant-id", String(tenant.id)); window.location.hash = "#config"; window.location.reload(); }}>Apri ambiente</button>
+        </article>)}
+      </div>
+      <p className="tenant-note">Ogni tenant dispone di utenti, agenti, chiavi, documenti, anagrafiche, campagne e trascrizioni separati.</p>
+    </div>
+    <Modal eyebrow="Superadmin" icon={<Building2 size={20} />} isOpen={isOpen} onClose={isBusy ? () => undefined : () => setIsOpen(false)} title="Nuovo tenant">
+      <form onSubmit={submit}><div className="modal-body modal-form"><label><span>Nome azienda</span><input autoFocus value={name} onChange={(event) => { setName(event.target.value); if (!slug) setSlug(event.target.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")); }} /></label><label><span>Slug</span><input value={slug} onChange={(event) => setSlug(event.target.value)} /></label></div><footer className="modal-actions"><button className="secondary-button" disabled={isBusy} type="button" onClick={() => setIsOpen(false)}>Annulla</button><button className="primary-button" disabled={isBusy || name.trim().length < 2 || slug.trim().length < 2} type="submit">{isBusy ? <Loader2 className="spin" size={16} /> : <Plus size={16} />}Crea tenant</button></footer></form>
+    </Modal>
+  </section>;
+}
+
 function UsersPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetError: (value: string | null) => void }) {
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [editingUser, setEditingUser] = useState<AuthUser | null>(null);
@@ -1194,7 +1269,7 @@ function UsersPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetEr
     setForm({
       username: user.username,
       password: "",
-      role: user.role,
+      role: user.role === "user" ? "user" : "admin",
       can_inbound: user.can_inbound,
       can_outbound: user.can_outbound,
       can_presentation: user.can_presentation,
@@ -1229,7 +1304,7 @@ function UsersPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetEr
   const toggleActive = async (user: AuthUser) => {
     setIsBusy(true);
     try {
-      await updateUser(user.id, { username: user.username, role: user.role, can_inbound: user.can_inbound, can_outbound: user.can_outbound, can_presentation: user.can_presentation, is_active: !user.is_active });
+      await updateUser(user.id, { username: user.username, role: user.role === "user" ? "user" : "admin", can_inbound: user.can_inbound, can_outbound: user.can_outbound, can_presentation: user.can_presentation, is_active: !user.is_active });
       await refresh();
     } catch (err) {
       onSetError(err instanceof Error ? err.message : "Aggiornamento utente fallito");
@@ -1321,6 +1396,7 @@ function CentralinoPage({
   onSetError,
   onStartOutboundCall,
   onRefreshOutboundCalls,
+  onRefreshOutboundContacts,
   onRefreshPhoneNumbers,
   onVectorPdfUpload,
   onVectorSourceChange,
@@ -1357,6 +1433,7 @@ function CentralinoPage({
     source: string | null,
   ) => Promise<void>;
   onRefreshOutboundCalls?: () => Promise<void>;
+  onRefreshOutboundContacts?: () => Promise<void>;
   onRefreshPhoneNumbers?: () => Promise<void>;
   onVectorPdfUpload: (files: File[]) => Promise<void>;
   onVectorSourceChange: (source: string | null) => void;
@@ -1383,6 +1460,7 @@ function CentralinoPage({
     onStartOutboundCall &&
     onDeleteAllOutboundCalls &&
     onRefreshOutboundCalls &&
+    onRefreshOutboundContacts &&
     onRefreshPhoneNumbers
   ) {
     return (
@@ -1457,6 +1535,7 @@ function CentralinoPage({
               onDeleteAllCalls={onDeleteAllOutboundCalls}
               onDelete={onDeleteContact}
               onRefreshCalls={onRefreshOutboundCalls}
+              onRefreshContacts={onRefreshOutboundContacts}
               onRefreshPhoneNumbers={onRefreshPhoneNumbers}
               onSetError={onSetError}
               onStartCall={onStartOutboundCall}
@@ -1696,6 +1775,7 @@ function OutboundContactsPanel({
   onDelete,
   onRefreshCalls,
   onRefreshPhoneNumbers,
+  onRefreshContacts,
   onSetError,
   onStartCall,
   onUpdate,
@@ -1710,6 +1790,7 @@ function OutboundContactsPanel({
   onDelete: (id: number) => Promise<void>;
   onRefreshCalls: () => Promise<void>;
   onRefreshPhoneNumbers: () => Promise<void>;
+  onRefreshContacts: () => Promise<void>;
   onSetError: (value: string | null) => void;
   onStartCall: (
     contactId: number,
@@ -1730,7 +1811,7 @@ function OutboundContactsPanel({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [selectedPhoneNumberId, setSelectedPhoneNumberId] = useState("");
   const [contactFilter, setContactFilter] = useState(() =>
-    localStorage.getItem("cp-demo-outbound-contact-filter") ?? "",
+    localStorage.getItem("cp-agent-outbound-contact-filter") ?? "",
   );
   const [selectionMode, setSelectionMode] = useState<"all" | "selected" | "unselected">("all");
   const [selectedContactIds, setSelectedContactIds] = useState<Set<number>>(new Set());
@@ -1748,6 +1829,13 @@ function OutboundContactsPanel({
   const [editPhone, setEditPhone] = useState("");
   const [isEditingContact, setIsEditingContact] = useState(false);
   const [isDeletingContact, setIsDeletingContact] = useState(false);
+  const [activeView, setActiveView] = useState<"contacts" | "campaigns" | "transcripts">("contacts");
+  const [campaigns, setCampaigns] = useState<OutboundCampaign[]>([]);
+  const [isImportOpen, setIsImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importSummary, setImportSummary] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [transcriptFilter, setTranscriptFilter] = useState("");
 
   useEffect(() => {
     if (
@@ -1760,7 +1848,7 @@ function OutboundContactsPanel({
   }, [phoneNumbers, selectedPhoneNumberId]);
 
   useEffect(() => {
-    localStorage.setItem("cp-demo-outbound-contact-filter", contactFilter);
+    localStorage.setItem("cp-agent-outbound-contact-filter", contactFilter);
   }, [contactFilter]);
 
   useEffect(() => {
@@ -1772,8 +1860,9 @@ function OutboundContactsPanel({
 
   const refreshCampaign = useCallback(async () => {
     try {
-      const latest = await getLatestOutboundCampaign();
+      const [latest, history] = await Promise.all([getLatestOutboundCampaign(), listOutboundCampaigns()]);
       setCampaign(latest);
+      setCampaigns(history);
       if (latest?.status === "completed" || latest?.status === "cancelled") {
         await onRefreshCalls();
       }
@@ -1781,6 +1870,18 @@ function OutboundContactsPanel({
       onSetError(err instanceof Error ? err.message : "Aggiornamento campagna fallito");
     }
   }, [onRefreshCalls, onSetError]);
+
+  const handleImport = async () => {
+    if (!importFile) return;
+    setIsImporting(true);
+    try {
+      const result = await importOutboundContacts(importFile);
+      setImportSummary(result);
+      await onRefreshContacts();
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Importazione CSV fallita");
+    } finally { setIsImporting(false); }
+  };
 
   useEffect(() => {
     void refreshCampaign();
@@ -1817,6 +1918,11 @@ function OutboundContactsPanel({
 
   const activeCampaign = campaign && ["queued", "running"].includes(campaign.status);
   const selectedContacts = contacts.filter((contact) => selectedContactIds.has(contact.id));
+  const filteredCalls = useMemo(() => {
+    const query = transcriptFilter.trim().toLocaleLowerCase("it-IT");
+    if (!query) return calls;
+    return calls.filter((call) => `${call.reference} ${call.phone} ${call.transcript} ${call.status}`.toLocaleLowerCase("it-IT").includes(query));
+  }, [calls, transcriptFilter]);
 
   const handleStartCampaign = async () => {
     if (!agentId || !selectedPhoneNumberId || selectedContacts.length === 0) {
@@ -1969,13 +2075,21 @@ function OutboundContactsPanel({
           <h2>Anagrafica</h2>
         </div>
         <div className="panel-heading-actions">
-          <button className="small-button primary" type="button" onClick={() => setIsContactModalOpen(true)}>
+          {activeView === "contacts" && <><button className="small-button" type="button" onClick={() => { setImportFile(null); setImportSummary(null); setIsImportOpen(true); }}>
+            <FileUp size={16} />Importa CSV
+          </button><button className="small-button primary" type="button" onClick={() => setIsContactModalOpen(true)}>
             <UserPlus size={16} />
             Nuovo contatto
-          </button>
+          </button></>}
           <Users size={22} />
         </div>
       </div>
+
+      <nav className="data-view-tabs" aria-label="Dati chiamate in uscita">
+        <button className={activeView === "contacts" ? "active" : ""} type="button" onClick={() => setActiveView("contacts")}><Users size={16} />Anagrafiche <span>{contacts.length}</span></button>
+        <button className={activeView === "campaigns" ? "active" : ""} type="button" onClick={() => setActiveView("campaigns")}><PhoneOutgoing size={16} />Campagne <span>{campaigns.length}</span></button>
+        <button className={activeView === "transcripts" ? "active" : ""} type="button" onClick={() => setActiveView("transcripts")}><BookOpen size={16} />Trascrizioni <span>{calls.length}</span></button>
+      </nav>
 
       <div className="outbound-toolbar">
         <label>
@@ -2007,7 +2121,7 @@ function OutboundContactsPanel({
         </button>
       </div>
 
-      {campaign && (
+      {activeView === "campaigns" && campaign && (
         <CampaignProgress
           campaign={campaign}
           isCancelling={isCancellingCampaign}
@@ -2015,6 +2129,12 @@ function OutboundContactsPanel({
           onDelete={() => setIsDeleteCampaignModalOpen(true)}
         />
       )}
+
+      {activeView === "campaigns" && campaigns.length > 1 && <div className="campaign-archive"><div className="section-heading"><h3>Storico campagne</h3><span>{campaigns.length}</span></div>{campaigns.filter((item) => item.id !== campaign?.id).map((item) => <button key={item.id} type="button" onClick={() => setCampaign(item)}><span>#{item.id}</span><strong>{item.status === "completed" ? "Completata" : item.status === "cancelled" ? "Interrotta" : "In corso"}</strong><small>{item.completed_count + item.failed_count}/{item.total_count} contatti</small><time>{new Date(item.created_at).toLocaleString("it-IT")}</time></button>)}</div>}
+
+      {activeView === "campaigns" && !campaign && <div className="data-empty-state"><PhoneOutgoing size={24} /><strong>Nessuna campagna</strong><span>Seleziona le anagrafiche e avvia una serie di chiamate.</span></div>}
+
+      {activeView === "contacts" && <>
 
       <div className="contact-filter-bar">
         <label className="contact-search">
@@ -2124,11 +2244,13 @@ function OutboundContactsPanel({
         <span>Ordinati per {sortField === "reference" ? "riferimento" : sortField === "phone" ? "telefono" : "ultima modifica"}</span>
       </div>
 
+      </>}
 
-      <div className="call-history-heading">
+
+      {activeView === "transcripts" && <><div className="transcript-toolbar"><label className="contact-search"><Search size={16} /><input aria-label="Cerca nelle trascrizioni" placeholder="Cerca nome, numero o testo trascritto" value={transcriptFilter} onChange={(event) => setTranscriptFilter(event.target.value)} /></label></div><div className="call-history-heading">
         <h3>Chiamate recenti</h3>
         <div className="call-history-actions">
-          <span>{calls.length}</span>
+          <span>{filteredCalls.length}</span>
           <button
             className="small-button danger"
             disabled={calls.length === 0 || isDeletingCalls}
@@ -2141,12 +2263,21 @@ function OutboundContactsPanel({
         </div>
       </div>
       <div className="call-history-list">
-        {calls.length === 0 ? (
-          <p className="muted">Nessuna chiamata avviata.</p>
+        {filteredCalls.length === 0 ? (
+          <p className="muted">Nessuna chiamata corrisponde alla ricerca.</p>
         ) : (
-          calls.map((call) => <OutboundCallRow call={call} key={call.id} />)
+          filteredCalls.map((call) => <OutboundCallRow call={call} key={call.id} />)
         )}
       </div>
+      </>}
+
+      <Modal eyebrow="Anagrafiche" icon={<FileUp size={20} />} isOpen={isImportOpen} onClose={isImporting ? () => undefined : () => setIsImportOpen(false)} title="Importa da CSV">
+        <div className="modal-body modal-form">
+          <label className="csv-dropzone"><FileUp size={24} /><strong>{importFile?.name ?? "Seleziona un file CSV"}</strong><span>Colonne richieste: riferimento (o nome) e telefono</span><input accept=".csv,text/csv" type="file" onChange={(event) => { setImportFile(event.target.files?.[0] ?? null); setImportSummary(null); }} /></label>
+          {importSummary && <div className="import-result"><strong>{importSummary.imported} importati</strong><span>{importSummary.skipped} ignorati</span>{importSummary.errors.length > 0 && <details><summary>Dettagli righe non importate</summary>{importSummary.errors.map((error) => <p key={error}>{error}</p>)}</details>}</div>}
+        </div>
+        <footer className="modal-actions"><button className="secondary-button" disabled={isImporting} type="button" onClick={() => setIsImportOpen(false)}>Chiudi</button><button className="primary-button" disabled={!importFile || isImporting || Boolean(importSummary)} type="button" onClick={() => void handleImport()}>{isImporting ? <Loader2 className="spin" size={16} /> : <FileUp size={16} />}Importa</button></footer>
+      </Modal>
 
       <Modal
         eyebrow="Anagrafica"
@@ -3309,7 +3440,7 @@ function VoicePanel({
   const isConnected = status === "connected";
   const effectiveAgentId = agentId || null;
   const effectiveAgentName = agentName || "non configurato";
-  const isAgentConfigured = Boolean(elevenLabsConfig.api_key && effectiveAgentId);
+  const isAgentConfigured = Boolean(elevenLabsConfig.configured && effectiveAgentId);
 
   useEffect(() => {
     if (!isConnected) {
@@ -3656,7 +3787,7 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) =>
   return <main className="login-page">
     <section className="login-visual">
       <img className="login-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
-      <h1>CP DEMO</h1>
+      <h1><span>CP</span> AGENT</h1>
       <p>La piattaforma vocale per gestire centralino, chiamate commerciali e presentazioni assistite.</p>
     </section>
     <section className="login-panel">
