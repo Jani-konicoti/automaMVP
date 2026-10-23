@@ -265,6 +265,14 @@ class OutboundCampaign(BaseModel):
     items: list[OutboundCampaignItem]
 
 
+class OutboundCampaignPage(BaseModel):
+    items: list[OutboundCampaign]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
 class ToolKnowledgeIn(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     limit: int = Field(default=4, ge=1, le=6)
@@ -2920,6 +2928,52 @@ def list_outbound_campaigns() -> list[OutboundCampaign]:
             (tenant_id(),),
         ).fetchall()
     return [get_outbound_campaign(row[0]) for row in rows]
+
+
+@app.get("/api/outbound-campaigns/history", response_model=OutboundCampaignPage)
+def outbound_campaign_history(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=8, ge=5, le=25),
+) -> OutboundCampaignPage:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM outbound_campaigns WHERE tenant_id = ?",
+            (tenant_id(),),
+        ).fetchone()[0]
+        pages = max(1, math.ceil(total / page_size))
+        selected_page = min(page, pages)
+        rows = conn.execute(
+            """
+            SELECT id FROM outbound_campaigns
+            WHERE tenant_id = ?
+            ORDER BY id DESC LIMIT ? OFFSET ?
+            """,
+            (tenant_id(), page_size, (selected_page - 1) * page_size),
+        ).fetchall()
+    return OutboundCampaignPage(
+        items=[get_outbound_campaign(row[0]) for row in rows],
+        total=total,
+        page=selected_page,
+        page_size=page_size,
+        pages=pages,
+    )
+
+
+@app.get("/api/outbound-campaigns/{campaign_id}/calls", response_model=list[OutboundCall])
+def outbound_campaign_calls(campaign_id: int) -> list[OutboundCall]:
+    get_outbound_campaign(campaign_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT * FROM outbound_calls
+            WHERE campaign_id = ? AND tenant_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (campaign_id, tenant_id()),
+        ).fetchall()
+    return [row_to_outbound_call(row) for row in rows]
 
 
 @app.post("/api/outbound-campaigns/{campaign_id}/cancel", response_model=OutboundCampaign)

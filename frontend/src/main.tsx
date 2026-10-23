@@ -16,8 +16,11 @@ import {
   CalendarClock,
   Check,
   Circle,
+  ChevronLeft,
+  ChevronRight,
   Database,
   FileUp,
+  Eye,
   KeyRound,
   Loader2,
   LogOut,
@@ -77,6 +80,8 @@ import {
   deleteUser,
   getCurrentUser,
   getLatestOutboundCampaign,
+  getOutboundCampaignCalls,
+  getOutboundCampaignHistory,
   getConversationToken,
   getElevenLabsConfig,
   getSignedUrl,
@@ -85,7 +90,6 @@ import {
   listAppointments,
   listElevenLabsPhoneNumbers,
   listOutboundCalls,
-  listOutboundCampaigns,
   listOutboundContacts,
   listUsers,
   listTenants,
@@ -1668,6 +1672,7 @@ function Modal({
   isOpen,
   onClose,
   title,
+  wide = false,
 }: {
   children: React.ReactNode;
   eyebrow?: string;
@@ -1675,6 +1680,7 @@ function Modal({
   isOpen: boolean;
   onClose: () => void;
   title: string;
+  wide?: boolean;
 }) {
   useEffect(() => {
     if (!isOpen) {
@@ -1703,7 +1709,7 @@ function Modal({
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         aria-modal="true"
-        className="modal-dialog"
+        className={`modal-dialog${wide ? " wide" : ""}`}
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -1830,7 +1836,14 @@ function OutboundContactsPanel({
   const [isEditingContact, setIsEditingContact] = useState(false);
   const [isDeletingContact, setIsDeletingContact] = useState(false);
   const [activeView, setActiveView] = useState<"contacts" | "campaigns" | "transcripts">("contacts");
-  const [campaigns, setCampaigns] = useState<OutboundCampaign[]>([]);
+  const [campaignHistory, setCampaignHistory] = useState<OutboundCampaign[]>([]);
+  const [campaignHistoryPage, setCampaignHistoryPage] = useState(1);
+  const [campaignHistoryPages, setCampaignHistoryPages] = useState(1);
+  const [campaignHistoryTotal, setCampaignHistoryTotal] = useState(0);
+  const [isCampaignHistoryLoading, setIsCampaignHistoryLoading] = useState(false);
+  const [detailCampaign, setDetailCampaign] = useState<OutboundCampaign | null>(null);
+  const [detailCalls, setDetailCalls] = useState<OutboundCall[]>([]);
+  const [isCampaignDetailLoading, setIsCampaignDetailLoading] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importSummary, setImportSummary] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null);
@@ -1858,11 +1871,28 @@ function OutboundContactsPanel({
     });
   }, [contacts]);
 
+  const refreshCampaignHistory = useCallback(async (page: number) => {
+    setIsCampaignHistoryLoading(true);
+    try {
+      const history = await getOutboundCampaignHistory(page);
+      setCampaignHistory(history.items);
+      setCampaignHistoryPage(history.page);
+      setCampaignHistoryPages(history.pages);
+      setCampaignHistoryTotal(history.total);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Caricamento storico campagne fallito");
+    } finally {
+      setIsCampaignHistoryLoading(false);
+    }
+  }, [onSetError]);
+
   const refreshCampaign = useCallback(async () => {
     try {
-      const [latest, history] = await Promise.all([getLatestOutboundCampaign(), listOutboundCampaigns()]);
+      const latest = await getLatestOutboundCampaign();
       setCampaign(latest);
-      setCampaigns(history);
+      if (latest) {
+        setCampaignHistory((current) => current.map((item) => item.id === latest.id ? latest : item));
+      }
       if (latest?.status === "completed" || latest?.status === "cancelled") {
         await onRefreshCalls();
       }
@@ -1885,7 +1915,8 @@ function OutboundContactsPanel({
 
   useEffect(() => {
     void refreshCampaign();
-  }, [refreshCampaign]);
+    void refreshCampaignHistory(1);
+  }, [refreshCampaign, refreshCampaignHistory]);
 
   useEffect(() => {
     if (!campaign || !["queued", "running"].includes(campaign.status)) {
@@ -1924,6 +1955,19 @@ function OutboundContactsPanel({
     return calls.filter((call) => `${call.reference} ${call.phone} ${call.transcript} ${call.status}`.toLocaleLowerCase("it-IT").includes(query));
   }, [calls, transcriptFilter]);
 
+  const openCampaignDetail = async (selectedCampaign: OutboundCampaign) => {
+    setDetailCampaign(selectedCampaign);
+    setDetailCalls([]);
+    setIsCampaignDetailLoading(true);
+    try {
+      setDetailCalls(await getOutboundCampaignCalls(selectedCampaign.id));
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Caricamento dettagli campagna fallito");
+    } finally {
+      setIsCampaignDetailLoading(false);
+    }
+  };
+
   const handleStartCampaign = async () => {
     if (!agentId || !selectedPhoneNumberId || selectedContacts.length === 0) {
       return;
@@ -1939,7 +1983,7 @@ function OutboundContactsPanel({
       setCampaign(created);
       setSelectedContactIds(new Set());
       setIsCampaignModalOpen(false);
-      await onRefreshCalls();
+      await Promise.all([onRefreshCalls(), refreshCampaignHistory(1)]);
     } catch (err) {
       onSetError(err instanceof Error ? err.message : "Avvio campagna fallito");
     } finally {
@@ -1952,6 +1996,7 @@ function OutboundContactsPanel({
     setIsCancellingCampaign(true);
     try {
       setCampaign(await cancelOutboundCampaign(campaign.id));
+      await refreshCampaignHistory(campaignHistoryPage);
     } catch (err) {
       onSetError(err instanceof Error ? err.message : "Interruzione campagna fallita");
     } finally {
@@ -1966,7 +2011,7 @@ function OutboundContactsPanel({
       await deleteOutboundCampaign(campaign.id);
       setCampaign(null);
       setIsDeleteCampaignModalOpen(false);
-      await onRefreshCalls();
+      await Promise.all([onRefreshCalls(), refreshCampaignHistory(campaignHistoryPage)]);
     } catch (err) {
       onSetError(err instanceof Error ? err.message : "Eliminazione campagna fallita");
     } finally {
@@ -2087,7 +2132,7 @@ function OutboundContactsPanel({
 
       <nav className="data-view-tabs" aria-label="Dati chiamate in uscita">
         <button className={activeView === "contacts" ? "active" : ""} type="button" onClick={() => setActiveView("contacts")}><Users size={16} />Anagrafiche <span>{contacts.length}</span></button>
-        <button className={activeView === "campaigns" ? "active" : ""} type="button" onClick={() => setActiveView("campaigns")}><PhoneOutgoing size={16} />Campagne <span>{campaigns.length}</span></button>
+        <button className={activeView === "campaigns" ? "active" : ""} type="button" onClick={() => setActiveView("campaigns")}><PhoneOutgoing size={16} />Campagne <span>{campaignHistoryTotal}</span></button>
         <button className={activeView === "transcripts" ? "active" : ""} type="button" onClick={() => setActiveView("transcripts")}><BookOpen size={16} />Trascrizioni <span>{calls.length}</span></button>
       </nav>
 
@@ -2121,7 +2166,7 @@ function OutboundContactsPanel({
         </button>
       </div>
 
-      {activeView === "campaigns" && campaign && (
+      {activeView === "campaigns" && activeCampaign && campaign && (
         <CampaignProgress
           campaign={campaign}
           isCancelling={isCancellingCampaign}
@@ -2130,9 +2175,48 @@ function OutboundContactsPanel({
         />
       )}
 
-      {activeView === "campaigns" && campaigns.length > 1 && <div className="campaign-archive"><div className="section-heading"><h3>Storico campagne</h3><span>{campaigns.length}</span></div>{campaigns.filter((item) => item.id !== campaign?.id).map((item) => <button key={item.id} type="button" onClick={() => setCampaign(item)}><span>#{item.id}</span><strong>{item.status === "completed" ? "Completata" : item.status === "cancelled" ? "Interrotta" : "In corso"}</strong><small>{item.completed_count + item.failed_count}/{item.total_count} contatti</small><time>{new Date(item.created_at).toLocaleString("it-IT")}</time></button>)}</div>}
-
-      {activeView === "campaigns" && !campaign && <div className="data-empty-state"><PhoneOutgoing size={24} /><strong>Nessuna campagna</strong><span>Seleziona le anagrafiche e avvia una serie di chiamate.</span></div>}
+      {activeView === "campaigns" && (
+        <section className="campaign-history-panel">
+          <header>
+            <div><h3>Storico campagne</h3><span>{campaignHistoryTotal} campagne totali</span></div>
+            <button className="icon-button" disabled={isCampaignHistoryLoading} title="Aggiorna storico" type="button" onClick={() => void refreshCampaignHistory(campaignHistoryPage)}>
+              <RefreshCw className={isCampaignHistoryLoading ? "spin" : ""} size={16} />
+            </button>
+          </header>
+          {isCampaignHistoryLoading && campaignHistory.length === 0 ? (
+            <div className="data-empty-state compact"><Loader2 className="spin" size={22} /><span>Caricamento campagne...</span></div>
+          ) : campaignHistory.length === 0 ? (
+            <div className="data-empty-state compact"><PhoneOutgoing size={24} /><strong>Nessuna campagna</strong><span>Seleziona le anagrafiche e avvia una serie di chiamate.</span></div>
+          ) : (
+            <>
+              <div className="campaign-history-table-shell">
+                <table className="campaign-history-table">
+                  <thead><tr><th>Campagna</th><th>Avviata</th><th>Stato</th><th>Contatti</th><th>Esiti</th><th aria-label="Azioni" /></tr></thead>
+                  <tbody>{campaignHistory.map((item) => {
+                    const processed = item.completed_count + item.failed_count;
+                    const label = item.status === "completed" ? "Completata" : item.status === "cancelled" ? "Interrotta" : item.status === "running" ? "In corso" : "In preparazione";
+                    return <tr key={item.id}>
+                      <td><strong>#{item.id}</strong>{item.id === campaign?.id && <small>Più recente</small>}</td>
+                      <td><time>{new Date(item.created_at).toLocaleString("it-IT")}</time></td>
+                      <td><span className={`campaign-status-badge ${item.status}`}>{label}</span></td>
+                      <td><strong>{processed}</strong><span> / {item.total_count}</span></td>
+                      <td><span className="campaign-outcomes success">{item.completed_count} completate</span><span className="campaign-outcomes failed">{item.failed_count} fallite</span></td>
+                      <td><button className="small-button" type="button" onClick={() => void openCampaignDetail(item)}><Eye size={15} />Dettagli</button></td>
+                    </tr>;
+                  })}</tbody>
+                </table>
+              </div>
+              <footer className="campaign-history-pagination">
+                <span>Pagina {campaignHistoryPage} di {campaignHistoryPages}</span>
+                <div>
+                  <button className="icon-button" disabled={campaignHistoryPage <= 1 || isCampaignHistoryLoading} title="Pagina precedente" type="button" onClick={() => void refreshCampaignHistory(campaignHistoryPage - 1)}><ChevronLeft size={17} /></button>
+                  <button className="icon-button" disabled={campaignHistoryPage >= campaignHistoryPages || isCampaignHistoryLoading} title="Pagina successiva" type="button" onClick={() => void refreshCampaignHistory(campaignHistoryPage + 1)}><ChevronRight size={17} /></button>
+                </div>
+              </footer>
+            </>
+          )}
+        </section>
+      )}
 
       {activeView === "contacts" && <>
 
@@ -2270,6 +2354,45 @@ function OutboundContactsPanel({
         )}
       </div>
       </>}
+
+      <Modal
+        eyebrow="Storico campagne"
+        icon={<PhoneOutgoing size={20} />}
+        isOpen={Boolean(detailCampaign)}
+        onClose={() => setDetailCampaign(null)}
+        title={`Campagna #${detailCampaign?.id ?? ""}`}
+        wide
+      >
+        {detailCampaign && <div className="modal-body campaign-detail">
+          <div className="campaign-detail-summary">
+            <div><span>Stato</span><strong>{detailCampaign.status === "completed" ? "Completata" : detailCampaign.status === "cancelled" ? "Interrotta" : detailCampaign.status === "running" ? "In corso" : "In preparazione"}</strong></div>
+            <div><span>Contatti</span><strong>{detailCampaign.total_count}</strong></div>
+            <div><span>Completate</span><strong>{detailCampaign.completed_count}</strong></div>
+            <div><span>Fallite</span><strong>{detailCampaign.failed_count}</strong></div>
+            <div><span>Avviata</span><strong>{new Date(detailCampaign.created_at).toLocaleString("it-IT")}</strong></div>
+          </div>
+          {isCampaignDetailLoading ? (
+            <div className="data-empty-state compact"><Loader2 className="spin" size={22} /><span>Caricamento chiamate e trascrizioni...</span></div>
+          ) : (
+            <div className="campaign-detail-items">
+              {detailCampaign.items.map((item) => {
+                const call = detailCalls.find((entry) => entry.id === item.outbound_call_id);
+                const statusLabel = item.status === "completed" ? "Completata" : item.status === "failed" ? "Fallita" : item.status === "cancelled" ? "Annullata" : item.status === "calling" ? "In chiamata" : "In attesa";
+                return <article className="campaign-detail-item" key={item.id}>
+                  <header>
+                    <span className="campaign-detail-position">{item.position}</span>
+                    <div><strong>{item.reference}</strong><small>{item.phone}</small></div>
+                    <span className={`campaign-status-badge ${item.status}`}>{statusLabel}</span>
+                  </header>
+                  {(item.error || call?.error) && <p className="campaign-detail-error">{item.error || call?.error}</p>}
+                  {call?.transcript ? <details className="campaign-detail-transcript"><summary><BookOpen size={15} />Trascrizione</summary><pre>{call.transcript}</pre></details> : <p className="campaign-detail-no-transcript">Trascrizione non disponibile</p>}
+                </article>;
+              })}
+            </div>
+          )}
+        </div>}
+        <footer className="modal-actions"><button className="secondary-button" type="button" onClick={() => setDetailCampaign(null)}>Chiudi</button></footer>
+      </Modal>
 
       <Modal eyebrow="Anagrafiche" icon={<FileUp size={20} />} isOpen={isImportOpen} onClose={isImporting ? () => undefined : () => setIsImportOpen(false)} title="Importa da CSV">
         <div className="modal-body modal-form">

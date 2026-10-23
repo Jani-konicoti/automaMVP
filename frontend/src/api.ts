@@ -87,6 +87,14 @@ export type OutboundCampaign = {
   items: OutboundCampaignItem[];
 };
 
+export type OutboundCampaignPage = {
+  items: OutboundCampaign[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
+};
+
 export type OutboundCampaignInput = {
   contact_ids: number[];
   agent_id: string;
@@ -472,6 +480,16 @@ export function getLatestOutboundCampaign() {
 
 export function listOutboundCampaigns() {
   return request<OutboundCampaign[]>("/api/outbound-campaigns");
+}
+
+export function getOutboundCampaignHistory(page = 1, pageSize = 8) {
+  return request<OutboundCampaignPage>(
+    `/api/outbound-campaigns/history?page=${page}&page_size=${pageSize}`,
+  );
+}
+
+export function getOutboundCampaignCalls(id: number) {
+  return request<OutboundCall[]>(`/api/outbound-campaigns/${id}/calls`);
 }
 
 export function cancelOutboundCampaign(id: number) {
