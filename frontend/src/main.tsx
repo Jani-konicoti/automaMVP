@@ -11,6 +11,7 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  BarChart3,
   BookOpen,
   Building2,
   CalendarClock,
@@ -21,6 +22,9 @@ import {
   Database,
   FileUp,
   Eye,
+  Folder,
+  FolderPlus,
+  GripVertical,
   KeyRound,
   Loader2,
   LogOut,
@@ -59,9 +63,12 @@ import {
   OutboundCampaign,
   OutboundContact,
   OutboundContactInput,
+  KnowledgeTree,
   VectorSearchResult,
   VectorStoreSource,
   VectorStoreStats,
+  UsageEvent,
+  UsageReport,
   UserCreateInput,
   UserUpdateInput,
   changePassword,
@@ -86,6 +93,7 @@ import {
   getElevenLabsConfig,
   getSignedUrl,
   getVectorStoreSources,
+  getKnowledgeTree,
   getVectorStoreStats,
   listAppointments,
   listElevenLabsPhoneNumbers,
@@ -106,6 +114,16 @@ import {
   updateUser,
   uploadVectorStorePdf,
   importOutboundContacts,
+  createKnowledgeArea,
+  createKnowledgeModule,
+  deleteKnowledgeArea,
+  deleteKnowledgeModule,
+  moveKnowledgeItem,
+  updateKnowledgeArea,
+  updateKnowledgeModule,
+  getUsageReport,
+  startUsageSession,
+  finishUsageSession,
 } from "./api";
 import "./styles.css";
 
@@ -114,15 +132,15 @@ type RetrievalQuery = {
   text: string;
 };
 
-type AppView = "demo" | "config" | "users" | "tenants";
+type AppView = "demo" | "config" | "users" | "tenants" | "usage";
 type MainTab = "centralino-entrata" | "centralino-uscita" | "presentazione";
 type VoiceContext = MainTab;
-type NavigationPage = MainTab | "config" | "users" | "tenants";
+type NavigationPage = MainTab | "config" | "users" | "tenants" | "usage";
 type OutboundSection = "operations" | "test" | "sources" | "appointments" | "events";
 
 function navigationPageFromHash(): NavigationPage {
   const page = window.location.hash.replace(/^#/, "");
-  return page === "centralino-uscita" || page === "presentazione" || page === "config" || page === "users" || page === "tenants"
+  return page === "centralino-uscita" || page === "presentazione" || page === "config" || page === "users" || page === "tenants" || page === "usage"
     ? page
     : "centralino-entrata";
 }
@@ -139,6 +157,7 @@ function canAccessPage(user: AuthUser, page: NavigationPage) {
   if (page === "centralino-uscita") return user.can_outbound;
   if (page === "presentazione") return user.can_presentation;
   if (page === "tenants") return user.role === "superadmin";
+  if (page === "usage") return user.role === "admin" || user.role === "superadmin";
   return user.role === "admin" || user.role === "superadmin";
 }
 
@@ -243,6 +262,29 @@ Prima recupera le informazioni principali con searchKnowledge. Poi presenta intr
 `.trim();
 }
 
+function knowledgeScopeLabel(scope: string | null, tree: KnowledgeTree) {
+  if (!scope) return "Tutte le fonti";
+  if (scope.startsWith("area:")) {
+    return tree.areas.find((area) => `area:${area.id}` === scope)?.name ?? scope;
+  }
+  for (const area of tree.areas) {
+    const module = area.modules.find((item) => `module:${item.id}` === scope);
+    if (module) return `${area.name} / ${module.name}`;
+    const document = area.modules.flatMap((item) => item.documents).find((item) => `document:${item.id}` === scope);
+    if (document) return document.source;
+  }
+  return tree.unassigned_documents.find((document) => `document:${document.id}` === scope)?.source ?? scope;
+}
+
+function knowledgeScopeExists(scope: string | null, tree: KnowledgeTree, sources: VectorStoreSource[]) {
+  if (!scope) return true;
+  if (sources.some((source) => source.source === scope)) return true;
+  if (scope.startsWith("area:")) return tree.areas.some((area) => `area:${area.id}` === scope);
+  if (scope.startsWith("module:")) return tree.areas.some((area) => area.modules.some((module) => `module:${module.id}` === scope));
+  return [...tree.unassigned_documents, ...tree.areas.flatMap((area) => area.modules.flatMap((module) => module.documents))]
+    .some((document) => `document:${document.id}` === scope);
+}
+
 function buildRetrievalUpdate(query: string, results: VectorSearchResult[]) {
   if (results.length === 0) {
     return "";
@@ -268,7 +310,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
     ? navigationPageFromHash()
     : firstAllowedPage(currentUser);
   const [appView, setAppView] = useState<AppView>(() =>
-    initialPage === "config" ? "config" : initialPage === "users" ? "users" : initialPage === "tenants" ? "tenants" : "demo",
+    initialPage === "config" ? "config" : initialPage === "users" ? "users" : initialPage === "tenants" ? "tenants" : initialPage === "usage" ? "usage" : "demo",
   );
   const [elevenLabsConfig, setElevenLabsConfig] = useState<ElevenLabsConfig>({
     api_key: "",
@@ -298,6 +340,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
     sources: 0,
   });
   const [vectorSources, setVectorSources] = useState<VectorStoreSource[]>([]);
+  const [knowledgeTree, setKnowledgeTree] = useState<KnowledgeTree>({ areas: [], unassigned_documents: [] });
   const [inboundVectorSource, setInboundVectorSource] = useState<string | null>(null);
   const [outboundVectorSource, setOutboundVectorSource] = useState<string | null>(null);
   const [presentationVectorSource, setPresentationVectorSource] = useState<string | null>(null);
@@ -377,10 +420,11 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
   useEffect(() => {
     const loadWorkspace = async () => {
       try {
-        const [configResponse, stats, sources] = await Promise.all([
+        const [configResponse, stats, sources, tree] = await Promise.all([
           getElevenLabsConfig(),
           getVectorStoreStats(),
           getVectorStoreSources(),
+          getKnowledgeTree(),
         ]);
         const appointmentRows = currentUser.can_inbound || currentUser.can_outbound
           ? await listAppointments()
@@ -392,10 +436,10 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         setAppointments(appointmentRows);
         setVectorStats(stats);
         setVectorSources(sources);
+        setKnowledgeTree(tree);
         setOutboundContacts(contacts);
         setOutboundCalls(calls);
-        const sourceExists = (source?: string | null) =>
-          Boolean(source && sources.some((item) => item.source === source));
+        const sourceExists = (source?: string | null) => Boolean(source && knowledgeScopeExists(source, tree, sources));
         setInboundVectorSource(
           sourceExists(configResponse.inbound_source) ? configResponse.inbound_source! : null,
         );
@@ -518,23 +562,23 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
   useEffect(() => {
     if (
       inboundVectorSource &&
-      !vectorSources.some((source) => source.source === inboundVectorSource)
+      !knowledgeScopeExists(inboundVectorSource, knowledgeTree, vectorSources)
     ) {
       setInboundVectorSource(null);
     }
     if (
       outboundVectorSource &&
-      !vectorSources.some((source) => source.source === outboundVectorSource)
+      !knowledgeScopeExists(outboundVectorSource, knowledgeTree, vectorSources)
     ) {
       setOutboundVectorSource(null);
     }
     if (
       presentationVectorSource &&
-      !vectorSources.some((source) => source.source === presentationVectorSource)
+      !knowledgeScopeExists(presentationVectorSource, knowledgeTree, vectorSources)
     ) {
       setPresentationVectorSource(null);
     }
-  }, [inboundVectorSource, outboundVectorSource, presentationVectorSource, vectorSources]);
+  }, [inboundVectorSource, outboundVectorSource, presentationVectorSource, vectorSources, knowledgeTree]);
 
   const handleVectorPdfUpload = useCallback(
     async (files: File[]) => {
@@ -552,12 +596,18 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         }
 
         const lastResponse = responses[responses.length - 1];
-        const sources = await getVectorStoreSources();
+        const [sources, tree] = await Promise.all([getVectorStoreSources(), getKnowledgeTree()]);
         setVectorStats({ chunks: lastResponse.chunks, sources: lastResponse.sources });
         setVectorSources(sources);
-        setInboundVectorSource(lastResponse.source);
-        setOutboundVectorSource(lastResponse.source);
-        setPresentationVectorSource(lastResponse.source);
+        setKnowledgeTree(tree);
+        const uploadedDocument = [
+          ...tree.unassigned_documents,
+          ...tree.areas.flatMap((area) => area.modules.flatMap((module) => module.documents)),
+        ].find((document) => document.source === lastResponse.source);
+        const uploadedScope = uploadedDocument ? `document:${uploadedDocument.id}` : lastResponse.source;
+        setInboundVectorSource(uploadedScope);
+        setOutboundVectorSource(uploadedScope);
+        setPresentationVectorSource(uploadedScope);
         setVectorStatus(
           files.length === 1
             ? `${lastResponse.source}: ${lastResponse.pages} pagine, ${lastResponse.extracted_chars.toLocaleString(
@@ -573,6 +623,10 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
     },
     [pdfMode],
   );
+
+  const handleKnowledgeTreeChange = useCallback((tree: KnowledgeTree) => {
+    setKnowledgeTree(tree);
+  }, []);
 
   const scheduleAppointment = useCallback(
     async (input: AppointmentInput) => {
@@ -705,6 +759,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         onUpdateOutboundContact={handleUpdateOutboundContact}
         onPdfModeChange={setPdfMode}
         onVectorPdfUpload={handleVectorPdfUpload}
+        onKnowledgeTreeChange={handleKnowledgeTreeChange}
         onInboundVectorSourceChange={(source) =>
           void persistFlowSource("centralino-entrata", source, setInboundVectorSource)
         }
@@ -721,6 +776,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         vectorStats={vectorStats}
         vectorStatus={vectorStatus}
         vectorSources={vectorSources}
+        knowledgeTree={knowledgeTree}
         inboundVectorSource={inboundVectorSource}
         outboundVectorSource={outboundVectorSource}
         presentationVectorSource={presentationVectorSource}
@@ -747,6 +803,7 @@ type ShellProps = {
   vectorStats: VectorStoreStats;
   vectorStatus: string | null;
   vectorSources: VectorStoreSource[];
+  knowledgeTree: KnowledgeTree;
   inboundVectorSource: string | null;
   outboundVectorSource: string | null;
   presentationVectorSource: string | null;
@@ -773,6 +830,7 @@ type ShellProps = {
   onUpdateElevenLabsAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
   onUpdateOutboundContact: (id: number, input: OutboundContactInput) => Promise<void>;
   onVectorPdfUpload: (files: File[]) => Promise<void>;
+  onKnowledgeTreeChange: (tree: KnowledgeTree) => void;
   onInboundVectorSourceChange: (source: string | null) => void;
   onOutboundVectorSourceChange: (source: string | null) => void;
   onPresentationVectorSourceChange: (source: string | null) => void;
@@ -797,6 +855,7 @@ function Shell({
   vectorStats,
   vectorStatus,
   vectorSources,
+  knowledgeTree,
   inboundVectorSource,
   outboundVectorSource,
   presentationVectorSource,
@@ -820,6 +879,7 @@ function Shell({
   onUpdateElevenLabsAgent,
   onUpdateOutboundContact,
   onVectorPdfUpload,
+  onKnowledgeTreeChange,
   onInboundVectorSourceChange,
   onOutboundVectorSourceChange,
   onPresentationVectorSourceChange,
@@ -828,7 +888,7 @@ function Shell({
 }: ShellProps) {
   const [mainTab, setMainTab] = useState<MainTab>(() => {
     const page = navigationPageFromHash();
-    return page === "config" || page === "users" || page === "tenants" ? firstAllowedPage(currentUser) as MainTab : page;
+    return page === "config" || page === "users" || page === "tenants" || page === "usage" ? firstAllowedPage(currentUser) as MainTab : page;
   });
   const [isNavigationOpen, setIsNavigationOpen] = useState(false);
   const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
@@ -879,7 +939,7 @@ function Shell({
     elevenLabsConfig.presentation_agent_id,
   ]);
 
-  const activePage: NavigationPage = appView === "config" ? "config" : appView === "users" ? "users" : appView === "tenants" ? "tenants" : mainTab;
+  const activePage: NavigationPage = appView === "config" ? "config" : appView === "users" ? "users" : appView === "tenants" ? "tenants" : appView === "usage" ? "usage" : mainTab;
   const pageDetails =
     activePage === "centralino-entrata"
       ? { eyebrow: "Centralino", title: "Chiamate in entrata", description: "Gestione agente, fonti e appuntamenti" }
@@ -889,6 +949,8 @@ function Shell({
           ? { eyebrow: "Presentazione", title: "Presentazione commerciale", description: "Sessioni guidate sulle fonti selezionate" }
           : activePage === "users"
             ? { eyebrow: "Amministrazione", title: "Utenti e accessi", description: "Ruoli, moduli e credenziali" }
+            : activePage === "usage"
+              ? { eyebrow: "Amministrazione", title: "Utilizzo", description: "Attivita e volumi del tenant" }
             : activePage === "tenants"
               ? { eyebrow: "Superadmin", title: "Tenant", description: "Aziende, ambienti e configurazioni isolate" }
             : { eyebrow: "Sistema", title: "Configurazione", description: "Agenti, credenziali e integrazioni" };
@@ -901,6 +963,8 @@ function Shell({
       onAppViewChange("users");
     } else if (page === "tenants") {
       onAppViewChange("tenants");
+    } else if (page === "usage") {
+      onAppViewChange("usage");
     } else {
       setMainTab(page);
       onAppViewChange("demo");
@@ -922,6 +986,8 @@ function Shell({
         onAppViewChange("users");
       } else if (page === "tenants") {
         onAppViewChange("tenants");
+      } else if (page === "usage") {
+        onAppViewChange("usage");
       } else {
         setMainTab(page);
         onAppViewChange("demo");
@@ -964,6 +1030,9 @@ function Shell({
           </button>}
 
           {(currentUser.role === "admin" || currentUser.role === "superadmin") && <><p>Amministrazione</p>
+            <button className={activePage === "usage" ? "active" : ""} type="button" onClick={() => navigateTo("usage")}>
+              <BarChart3 size={18} /><span>Utilizzo</span>
+            </button>
             {currentUser.role === "superadmin" && <button className={activePage === "tenants" ? "active" : ""} type="button" onClick={() => navigateTo("tenants")}>
               <Building2 size={18} /><span>Tenant</span>
             </button>}
@@ -1042,6 +1111,8 @@ function Shell({
           <UsersPage currentUser={currentUser} onSetError={onSetError} />
         ) : appView === "tenants" ? (
           <TenantsPage currentUser={currentUser} onSetError={onSetError} />
+        ) : appView === "usage" ? (
+          <UsagePage currentUser={currentUser} onSetError={onSetError} />
         ) : (
           <section className="main-workspace">
             {mainTab === "centralino-entrata" ? (
@@ -1064,6 +1135,9 @@ function Shell({
                 selectedVectorSource={inboundVectorSource}
                 title="Centralino Entrata"
                 vectorSources={vectorSources}
+                knowledgeTree={knowledgeTree}
+                canManageKnowledge={currentUser.role === "admin" || currentUser.role === "superadmin"}
+                onKnowledgeTreeChange={onKnowledgeTreeChange}
                 vectorStats={vectorStats}
                 vectorStatus={vectorStatus}
               />
@@ -1097,6 +1171,9 @@ function Shell({
                 selectedVectorSource={outboundVectorSource}
                 title="Centralino Uscita"
                 vectorSources={vectorSources}
+                knowledgeTree={knowledgeTree}
+                canManageKnowledge={currentUser.role === "admin" || currentUser.role === "superadmin"}
+                onKnowledgeTreeChange={onKnowledgeTreeChange}
                 vectorStats={vectorStats}
                 vectorStatus={vectorStatus}
               />
@@ -1113,6 +1190,9 @@ function Shell({
                 selectedVectorSource={presentationVectorSource}
                 transcript={presentationTranscript}
                 vectorSources={vectorSources}
+                knowledgeTree={knowledgeTree}
+                canManageKnowledge={currentUser.role === "admin" || currentUser.role === "superadmin"}
+                onKnowledgeTreeChange={onKnowledgeTreeChange}
               />
             )}
           </section>
@@ -1180,6 +1260,80 @@ const emptyUserInput: UserCreateInput = {
   can_outbound: false,
   can_presentation: false,
 };
+
+const usageLabels: Record<UsageEvent["channel"], string> = {
+  inbound: "Centralino entrata",
+  outbound: "Centralino uscita",
+  presentation: "Presentazione",
+};
+
+function formatUsageDuration(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours ? `${hours}h ${minutes}m` : `${minutes} min`;
+}
+
+function UsagePage({ currentUser, onSetError }: { currentUser: AuthUser; onSetError: (value: string | null) => void }) {
+  const [days, setDays] = useState(30);
+  const [page, setPage] = useState(1);
+  const [channel, setChannel] = useState<UsageEvent["channel"] | "">("");
+  const [report, setReport] = useState<UsageReport | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      setReport(await getUsageReport(days, page, channel));
+      onSetError(null);
+    } catch (error) {
+      onSetError(error instanceof Error ? error.message : "Caricamento utilizzo fallito");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [channel, days, onSetError, page]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const chartDays = report?.daily.slice(-Math.min(days, 31)) ?? [];
+  const chartMax = Math.max(1, ...chartDays.map((item) => item.inbound + item.outbound + item.presentation));
+
+  return <section className="usage-page">
+    <div className="usage-toolbar">
+      <div><strong>{report?.tenant_name ?? currentUser.tenant_name}</strong><span>{currentUser.role === "superadmin" ? "Tenant selezionato" : "Il tuo tenant"}</span></div>
+      <div className="usage-filters">
+        <label><span>Periodo</span><select value={days} onChange={(event) => { setDays(Number(event.target.value)); setPage(1); }}><option value={7}>7 giorni</option><option value={30}>30 giorni</option><option value={90}>90 giorni</option><option value={365}>12 mesi</option></select></label>
+        <button className="icon-button" title="Aggiorna" type="button" onClick={() => void refresh()}>{isLoading ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}</button>
+      </div>
+    </div>
+
+    <div className="usage-summary-grid">
+      {(report?.channels ?? []).map((stats) => <article className={`usage-summary-card ${stats.channel}`} key={stats.channel}>
+        <div><span className="usage-channel-icon">{stats.channel === "inbound" ? <PhoneIncoming size={19} /> : stats.channel === "outbound" ? <PhoneOutgoing size={19} /> : <Presentation size={19} />}</span><strong>{usageLabels[stats.channel]}</strong></div>
+        <b>{stats.sessions}</b><span>sessioni nel periodo</span>
+        <dl><div><dt>Durata</dt><dd>{formatUsageDuration(stats.duration_seconds)}</dd></div><div><dt>Media</dt><dd>{formatUsageDuration(stats.average_duration_seconds)}</dd></div><div><dt>Fallite</dt><dd>{stats.failed}</dd></div></dl>
+      </article>)}
+      {!report && <div className="usage-loading"><Loader2 className="spin" size={22} />Caricamento statistiche</div>}
+    </div>
+
+    <section className="workspace-panel usage-chart-panel">
+      <div className="panel-heading"><div><p className="eyebrow">Andamento</p><h2>Sessioni giornaliere</h2></div><div className="usage-legend"><span><i className="inbound" />Entrata</span><span><i className="outbound" />Uscita</span><span><i className="presentation" />Presentazione</span></div></div>
+      <div className="usage-chart" role="img" aria-label="Sessioni giornaliere per canale">
+        {chartDays.map((item) => { const total = item.inbound + item.outbound + item.presentation; return <div className="usage-chart-day" key={item.date} title={`${new Date(`${item.date}T00:00:00`).toLocaleDateString("it-IT")}: ${total}`}><div className="usage-chart-stack" style={{ height: `${Math.max(total ? 8 : 2, (total / chartMax) * 100)}%` }}>{item.presentation > 0 && <i className="presentation" style={{ flex: item.presentation }} />}{item.outbound > 0 && <i className="outbound" style={{ flex: item.outbound }} />}{item.inbound > 0 && <i className="inbound" style={{ flex: item.inbound }} />}</div><span>{new Date(`${item.date}T00:00:00`).toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit" })}</span></div>; })}
+      </div>
+    </section>
+
+    <section className="workspace-panel usage-log-panel">
+      <div className="panel-heading"><div><p className="eyebrow">Log</p><h2>Attivita recenti</h2></div><label className="usage-channel-filter"><span>Canale</span><select value={channel} onChange={(event) => { setChannel(event.target.value as UsageEvent["channel"] | ""); setPage(1); }}><option value="">Tutti</option><option value="inbound">Centralino entrata</option><option value="outbound">Centralino uscita</option><option value="presentation">Presentazione</option></select></label></div>
+      <div className="usage-log-table">
+        <div className="usage-log-row header"><span>Data e ora</span><span>Canale</span><span>Origine</span><span>Esito</span><span>Durata</span><span>Conversazione</span></div>
+        {report?.events.map((event) => <div className="usage-log-row" key={event.id}><span>{new Date(event.started_at).toLocaleString("it-IT", { dateStyle: "short", timeStyle: "short" })}</span><strong>{usageLabels[event.channel]}</strong><span>{event.origin === "phone" ? "Telefono" : "Web"}</span><span className={`usage-status ${event.status}`}>{event.status === "completed" ? "Completata" : event.status === "started" ? "In corso" : event.status === "cancelled" ? "Interrotta" : "Fallita"}</span><span>{formatUsageDuration(event.duration_seconds)}</span><code title={event.conversation_id ?? ""}>{event.conversation_id ?? "-"}</code></div>)}
+        {!isLoading && report?.events.length === 0 && <p className="empty-state">Nessuna attivita nel periodo selezionato.</p>}
+      </div>
+      <div className="campaign-history-pagination"><span>{report ? `${report.total} eventi` : ""}</span><div><button className="icon-button" disabled={!report || report.page <= 1} title="Pagina precedente" type="button" onClick={() => setPage((value) => Math.max(1, value - 1))}><ChevronLeft size={16} /></button><span>{report ? `${report.page} / ${report.pages}` : "-"}</span><button className="icon-button" disabled={!report || report.page >= report.pages} title="Pagina successiva" type="button" onClick={() => setPage((value) => value + 1)}><ChevronRight size={16} /></button></div></div>
+    </section>
+  </section>;
+}
 
 function TenantsPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetError: (value: string | null) => void }) {
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -1383,6 +1537,9 @@ function CentralinoPage({
   vectorSources,
   vectorStats,
   vectorStatus,
+  knowledgeTree,
+  canManageKnowledge,
+  onKnowledgeTreeChange,
 }: {
   agentId: string | null;
   appointments: Appointment[];
@@ -1414,6 +1571,9 @@ function CentralinoPage({
   vectorSources: VectorStoreSource[];
   vectorStats: VectorStoreStats;
   vectorStatus: string | null;
+  knowledgeTree: KnowledgeTree;
+  canManageKnowledge: boolean;
+  onKnowledgeTreeChange: (tree: KnowledgeTree) => void;
 }) {
   const [outboundSection, setOutboundSection] = useState<OutboundSection>("operations");
   const selectedAgent = elevenLabsConfig.agents.find(
@@ -1490,7 +1650,7 @@ function CentralinoPage({
               </div>
               <div className="outbound-context-summary">
                 <span>Fonte attiva</span>
-                <strong>{selectedVectorSource ?? "Tutte le fonti"}</strong>
+                <strong>{knowledgeScopeLabel(selectedVectorSource, knowledgeTree)}</strong>
                 <small>{vectorSources.length} PDF indicizzati</small>
               </div>
             </section>
@@ -1551,6 +1711,10 @@ function CentralinoPage({
               onChange={onVectorSourceChange}
               selectedSource={selectedVectorSource}
               sources={vectorSources}
+              tree={knowledgeTree}
+              canManage={canManageKnowledge}
+              onTreeChange={onKnowledgeTreeChange}
+              onSetError={onSetError}
             />
           </section>
         )}
@@ -1601,6 +1765,10 @@ function CentralinoPage({
           onChange={onVectorSourceChange}
           selectedSource={selectedVectorSource}
           sources={vectorSources}
+          tree={knowledgeTree}
+          canManage={canManageKnowledge}
+          onTreeChange={onKnowledgeTreeChange}
+          onSetError={onSetError}
         />
       </section>
 
@@ -2866,19 +3034,66 @@ function VectorPdfManager({
 
 function VectorSourceSelector({
   allSourcesDescription,
+  canManage,
   name,
   onChange,
+  onSetError,
+  onTreeChange,
   selectedSource,
   sources,
+  tree,
 }: {
   allSourcesDescription: string;
+  canManage: boolean;
   name: string;
   onChange: (source: string | null) => void;
+  onSetError: (value: string | null) => void;
+  onTreeChange: (tree: KnowledgeTree) => void;
   selectedSource: string | null;
   sources: VectorStoreSource[];
+  tree: KnowledgeTree;
 }) {
+  const [isManaging, setIsManaging] = useState(false);
+  const [isBusy, setIsBusy] = useState(false);
+  const [editor, setEditor] = useState<{ kind: "area" | "module"; id?: number; parentId?: number; name: string } | null>(null);
+  const [deleting, setDeleting] = useState<{ kind: "area" | "module"; id: number; name: string } | null>(null);
+  const draggedItem = useRef<{ kind: "areas" | "modules" | "documents"; id: number } | null>(null);
+
+  const documentCount = (areaId: number) => tree.areas.find((area) => area.id === areaId)?.modules.reduce((sum, module) => sum + module.documents.length, 0) ?? 0;
+  const runTreeAction = async (action: () => Promise<KnowledgeTree>) => {
+    setIsBusy(true);
+    onSetError(null);
+    try { onTreeChange(await action()); return true; }
+    catch (error) { onSetError(error instanceof Error ? error.message : "Aggiornamento fonti fallito"); return false; }
+    finally { setIsBusy(false); }
+  };
+  const saveEditor = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editor?.name.trim()) return;
+    const saved = await runTreeAction(() => editor.kind === "area"
+      ? editor.id ? updateKnowledgeArea(editor.id, editor.name.trim()) : createKnowledgeArea(editor.name.trim())
+      : editor.id ? updateKnowledgeModule(editor.id, editor.parentId!, editor.name.trim()) : createKnowledgeModule(editor.parentId!, editor.name.trim()));
+    if (saved) setEditor(null);
+  };
+  const confirmDelete = async () => {
+    if (!deleting) return;
+    const removed = await runTreeAction(() => deleting.kind === "area" ? deleteKnowledgeArea(deleting.id) : deleteKnowledgeModule(deleting.id));
+    if (removed) setDeleting(null);
+  };
+  const moveDragged = async (kind: "areas" | "modules" | "documents", parentId: number | null, position: number) => {
+    const dragged = draggedItem.current;
+    if (!dragged || dragged.kind !== kind) return;
+    draggedItem.current = null;
+    await runTreeAction(() => moveKnowledgeItem(kind, dragged.id, parentId, position));
+  };
+
   return (
-    <div className="vector-sources">
+    <div className={`knowledge-selector${isManaging ? " managing" : ""}`}>
+      <div className="knowledge-selector-toolbar">
+        <div><strong>Ambito della conoscenza</strong><span>{knowledgeScopeLabel(selectedSource, tree)}</span></div>
+        {canManage && <button className={`small-button${isManaging ? " primary" : ""}`} type="button" onClick={() => setIsManaging((value) => !value)}><GripVertical size={15} />{isManaging ? "Fine" : "Organizza"}</button>}
+      </div>
+      <div className="vector-sources knowledge-tree">
       <label className="vector-source-option all-sources">
         <input
           checked={selectedSource === null}
@@ -2891,26 +3106,40 @@ function VectorSourceSelector({
           <small>{allSourcesDescription}</small>
         </span>
       </label>
-      {sources.map((source) => (
-        <label className="vector-source-option" key={source.source}>
-          <input
-            checked={selectedSource === source.source}
-            name={name}
-            type="radio"
-            onChange={() => onChange(source.source)}
-          />
-          <article className="vector-source-card">
-            <div>
-              <strong>{source.source}</strong>
-              <span>
-                {source.chunks.toLocaleString("it-IT")} chunk -{" "}
-                {source.chars.toLocaleString("it-IT")} caratteri
-              </span>
-            </div>
-            <p>{source.preview}</p>
-          </article>
-        </label>
-      ))}
+      {tree.areas.map((area, areaIndex) => <section
+        className="knowledge-area"
+        draggable={isManaging}
+        key={area.id}
+        onDragStart={() => { draggedItem.current = { kind: "areas", id: area.id }; }}
+        onDragOver={(event) => { if (isManaging) event.preventDefault(); }}
+        onDrop={() => { const dragged = draggedItem.current; if (dragged?.kind === "modules") void moveDragged("modules", area.id, area.modules.length); else void moveDragged("areas", null, areaIndex); }}
+      >
+        <header>
+          {isManaging && <GripVertical className="drag-handle" size={16} />}
+          <label><input checked={selectedSource === `area:${area.id}`} disabled={documentCount(area.id) === 0} name={name} type="radio" onChange={() => onChange(`area:${area.id}`)} /><Folder size={17} /><strong>{area.name}</strong><span>{documentCount(area.id)} documenti</span></label>
+          {isManaging && <div className="knowledge-actions"><button title="Nuovo modulo" type="button" onClick={() => setEditor({ kind: "module", parentId: area.id, name: "" })}><FolderPlus size={15} /></button><button title="Rinomina area" type="button" onClick={() => setEditor({ kind: "area", id: area.id, name: area.name })}><Pencil size={14} /></button><button title="Elimina area" type="button" onClick={() => setDeleting({ kind: "area", id: area.id, name: area.name })}><Trash2 size={14} /></button></div>}
+        </header>
+        <div className="knowledge-modules">
+          {area.modules.map((module, moduleIndex) => <section
+            className="knowledge-module"
+            draggable={isManaging}
+            key={module.id}
+            onDragStart={(event) => { event.stopPropagation(); draggedItem.current = { kind: "modules", id: module.id }; }}
+            onDragOver={(event) => { if (isManaging) event.preventDefault(); }}
+            onDrop={(event) => { event.stopPropagation(); const dragged = draggedItem.current; if (dragged?.kind === "documents") void moveDragged("documents", module.id, module.documents.length); else void moveDragged("modules", area.id, moduleIndex); }}
+          >
+            <header>{isManaging && <GripVertical className="drag-handle" size={15} />}<label><input checked={selectedSource === `module:${module.id}`} disabled={module.documents.length === 0} name={name} type="radio" onChange={() => onChange(`module:${module.id}`)} /><strong>{module.name}</strong><span>{module.documents.length}</span></label>{isManaging && <div className="knowledge-actions"><button title="Rinomina modulo" type="button" onClick={() => setEditor({ kind: "module", id: module.id, parentId: area.id, name: module.name })}><Pencil size={14} /></button><button title="Elimina modulo" type="button" onClick={() => setDeleting({ kind: "module", id: module.id, name: module.name })}><Trash2 size={14} /></button></div>}</header>
+            <div className="knowledge-documents">{module.documents.map((document, documentIndex) => <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={(event) => { event.stopPropagation(); draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", module.id, documentIndex); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>)}</div>
+          </section>)}
+          {area.modules.length === 0 && <p className="knowledge-empty">Nessun modulo in quest'area.</p>}
+        </div>
+      </section>)}
+      {tree.unassigned_documents.length > 0 && <section className="knowledge-unassigned" onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={() => void moveDragged("documents", null, tree.unassigned_documents.length)}><header><strong>Non organizzati</strong><span>{tree.unassigned_documents.length}</span></header>{tree.unassigned_documents.map((document, index) => <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={() => { draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", null, index); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>)}</section>}
+      {tree.areas.length === 0 && tree.unassigned_documents.length === 0 && sources.length === 0 && <p className="knowledge-empty standalone">Nessun documento indicizzato.</p>}
+      </div>
+      {isManaging && <button className="knowledge-add-area" disabled={isBusy} type="button" onClick={() => setEditor({ kind: "area", name: "" })}><Plus size={15} />Nuova area</button>}
+      <Modal eyebrow="Organizzazione fonti" icon={editor?.kind === "area" ? <Folder size={19} /> : <FolderPlus size={19} />} isOpen={Boolean(editor)} onClose={isBusy ? () => undefined : () => setEditor(null)} title={`${editor?.id ? "Modifica" : "Nuova"} ${editor?.kind === "area" ? "area" : "modulo"}`}><form onSubmit={(event) => void saveEditor(event)}><div className="modal-body modal-form"><label><span>Nome</span><input autoFocus disabled={isBusy} value={editor?.name ?? ""} onChange={(event) => setEditor((current) => current ? { ...current, name: event.target.value } : current)} /></label></div><footer className="modal-actions"><button className="secondary-button" disabled={isBusy} type="button" onClick={() => setEditor(null)}>Annulla</button><button className="primary-button" disabled={isBusy || !editor?.name.trim()} type="submit">{isBusy ? <Loader2 className="spin" size={15} /> : <Save size={15} />}Salva</button></footer></form></Modal>
+      <ConfirmDialog confirmLabel="Elimina" description={`I documenti contenuti in ${deleting?.name ?? "questo elemento"} verranno spostati tra quelli non organizzati e non saranno cancellati.`} isBusy={isBusy} isOpen={Boolean(deleting)} onClose={() => setDeleting(null)} onConfirm={() => void confirmDelete()} title={`Eliminare ${deleting?.kind === "area" ? "l'area" : "il modulo"}?`} />
     </div>
   );
 }
@@ -2927,6 +3156,9 @@ function PresentationPage({
   selectedVectorSource,
   transcript,
   vectorSources,
+  knowledgeTree,
+  canManageKnowledge,
+  onKnowledgeTreeChange,
 }: {
   agentId: string | null;
   elevenLabsConfig: ElevenLabsConfig;
@@ -2939,13 +3171,13 @@ function PresentationPage({
   selectedVectorSource: string | null;
   transcript: string[];
   vectorSources: VectorStoreSource[];
+  knowledgeTree: KnowledgeTree;
+  canManageKnowledge: boolean;
+  onKnowledgeTreeChange: (tree: KnowledgeTree) => void;
 }) {
   const selectedAgent = elevenLabsConfig.agents.find(
     (agent) => agent.agent_id === agentId,
   );
-  const selectedSource = selectedVectorSource
-    ? vectorSources.find((source) => source.source === selectedVectorSource)
-    : undefined;
   const startPrompt = buildPresentationStartPrompt(selectedVectorSource);
 
   return (
@@ -2974,12 +3206,16 @@ function PresentationPage({
           onChange={onVectorSourceChange}
           selectedSource={selectedVectorSource}
           sources={vectorSources}
+          tree={knowledgeTree}
+          canManage={canManageKnowledge}
+          onTreeChange={onKnowledgeTreeChange}
+          onSetError={onSetError}
         />
 
         <div className="presentation-summary">
           <strong>Pronto per presentare</strong>
           <span>Agente: {selectedAgent?.name || "non configurato"}</span>
-          <span>Fonte: {selectedSource?.source || "tutte le fonti"}</span>
+          <span>Fonte: {knowledgeScopeLabel(selectedVectorSource, knowledgeTree)}</span>
         </div>
       </section>
 
@@ -3466,10 +3702,32 @@ function VoicePanel({
   const hasSentStartPromptRef = useRef(false);
   const lastContextUpdateRef = useRef("");
   const lastRetrievalIdRef = useRef<number | null>(null);
+  const usageEventIdRef = useRef<number | null>(null);
+  const usageSessionActiveRef = useRef(false);
+  const wasConnectedRef = useRef(false);
   const isConnected = status === "connected";
   const effectiveAgentId = agentId || null;
   const effectiveAgentName = agentName || "non configurato";
   const isAgentConfigured = Boolean(elevenLabsConfig.configured && effectiveAgentId);
+
+  const finishTrackedSession = useCallback((sessionStatus: "completed" | "failed" | "cancelled" = "completed") => {
+    const eventId = usageEventIdRef.current;
+    usageSessionActiveRef.current = false;
+    if (!eventId) return;
+    usageEventIdRef.current = null;
+    void finishUsageSession(eventId, sessionStatus).catch((error) => console.warn("Usage session finish failed", error));
+  }, []);
+
+  useEffect(() => {
+    if (isConnected) {
+      wasConnectedRef.current = true;
+    } else if (wasConnectedRef.current) {
+      wasConnectedRef.current = false;
+      finishTrackedSession("completed");
+    }
+  }, [finishTrackedSession, isConnected]);
+
+  useEffect(() => () => finishTrackedSession("cancelled"), [finishTrackedSession]);
 
   useEffect(() => {
     if (!isConnected) {
@@ -3569,21 +3827,32 @@ function VoicePanel({
       onBeforeStart?.();
       onVoiceContextChange(contextMode);
       onSetError(null);
+      let conversationId: string | null = null;
       if (connectionMode === "webrtc") {
         const response = await getConversationToken(effectiveAgentId, contextMode);
-        await startSession({
+        const started = await startSession({
           conversationToken: response.token,
           connectionType: "webrtc",
           textOnly: false,
         });
+        conversationId = typeof started === "string" ? started : null;
       } else {
         const response = await getSignedUrl(effectiveAgentId, contextMode);
-        await startSession({
+        const started = await startSession({
           signedUrl: response.signed_url,
           connectionType: "websocket",
           textOnly: false,
         });
+        conversationId = typeof started === "string" ? started : null;
       }
+      const channel = contextMode === "centralino-entrata" ? "inbound" : contextMode === "centralino-uscita" ? "outbound" : "presentation";
+      usageSessionActiveRef.current = true;
+      startUsageSession({ channel, origin: "web", conversation_id: conversationId, agent_id: effectiveAgentId, source: selectedVectorSource })
+        .then((event) => {
+          if (usageSessionActiveRef.current) usageEventIdRef.current = event.id;
+          else void finishUsageSession(event.id, "completed");
+        })
+        .catch((error) => console.warn("Usage session start failed", error));
     } catch (err) {
       onVoiceContextChange(null);
       onSetError(err instanceof Error ? err.message : "Avvio sessione fallito");
@@ -3594,6 +3863,7 @@ function VoicePanel({
 
   const handleEnd = () => {
     onVoiceContextChange(null);
+    finishTrackedSession("completed");
     endSession();
   };
 

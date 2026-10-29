@@ -1,6 +1,8 @@
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ||
-  (import.meta.env.DEV ? "http://127.0.0.1:8001" : window.location.origin);
+  (import.meta.env.DEV
+    ? `${window.location.protocol}//${window.location.hostname}:8001`
+    : window.location.origin);
 
 export type Appointment = {
   id: number;
@@ -174,6 +176,32 @@ export type VectorStoreSource = {
   preview: string;
 };
 
+export type KnowledgeDocument = VectorStoreSource & {
+  id: number;
+  position: number;
+  module_id: number | null;
+};
+
+export type KnowledgeModule = {
+  id: number;
+  area_id: number;
+  name: string;
+  position: number;
+  documents: KnowledgeDocument[];
+};
+
+export type KnowledgeArea = {
+  id: number;
+  name: string;
+  position: number;
+  modules: KnowledgeModule[];
+};
+
+export type KnowledgeTree = {
+  areas: KnowledgeArea[];
+  unassigned_documents: KnowledgeDocument[];
+};
+
 export type VectorSearchResult = {
   id: number;
   source: string;
@@ -203,6 +231,48 @@ export type Tenant = {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+};
+
+export type UsageEvent = {
+  id: number;
+  channel: "inbound" | "outbound" | "presentation";
+  origin: "web" | "phone";
+  conversation_id?: string | null;
+  agent_id?: string | null;
+  source?: string | null;
+  status: string;
+  duration_seconds: number;
+  started_at: string;
+  completed_at?: string | null;
+};
+
+export type UsageChannelStats = {
+  channel: UsageEvent["channel"];
+  sessions: number;
+  completed: number;
+  failed: number;
+  duration_seconds: number;
+  average_duration_seconds: number;
+};
+
+export type UsageDailyStats = {
+  date: string;
+  inbound: number;
+  outbound: number;
+  presentation: number;
+};
+
+export type UsageReport = {
+  tenant_id: number;
+  tenant_name: string;
+  days: number;
+  channels: UsageChannelStats[];
+  daily: UsageDailyStats[];
+  events: UsageEvent[];
+  total: number;
+  page: number;
+  page_size: number;
+  pages: number;
 };
 
 export type ContactImportResult = {
@@ -343,6 +413,41 @@ export function getVectorStoreStats() {
 
 export function getVectorStoreSources() {
   return request<VectorStoreSource[]>("/api/vector-store/sources");
+}
+
+export function getKnowledgeTree() {
+  return request<KnowledgeTree>("/api/knowledge-tree");
+}
+
+export function createKnowledgeArea(name: string) {
+  return request<KnowledgeTree>("/api/knowledge-tree/areas", { method: "POST", body: JSON.stringify({ name }) });
+}
+
+export function updateKnowledgeArea(id: number, name: string) {
+  return request<KnowledgeTree>(`/api/knowledge-tree/areas/${id}`, { method: "PUT", body: JSON.stringify({ name }) });
+}
+
+export function deleteKnowledgeArea(id: number) {
+  return request<KnowledgeTree>(`/api/knowledge-tree/areas/${id}`, { method: "DELETE" });
+}
+
+export function createKnowledgeModule(areaId: number, name: string) {
+  return request<KnowledgeTree>("/api/knowledge-tree/modules", { method: "POST", body: JSON.stringify({ area_id: areaId, name }) });
+}
+
+export function updateKnowledgeModule(id: number, areaId: number, name: string) {
+  return request<KnowledgeTree>(`/api/knowledge-tree/modules/${id}`, { method: "PUT", body: JSON.stringify({ area_id: areaId, name }) });
+}
+
+export function deleteKnowledgeModule(id: number) {
+  return request<KnowledgeTree>(`/api/knowledge-tree/modules/${id}`, { method: "DELETE" });
+}
+
+export function moveKnowledgeItem(kind: "areas" | "modules" | "documents", id: number, parentId: number | null, position: number) {
+  return request<KnowledgeTree>(`/api/knowledge-tree/${kind}/${id}/move`, {
+    method: "PUT",
+    body: JSON.stringify({ parent_id: parentId, position }),
+  });
 }
 
 export function searchVectorStore(query: string, limit = 4, source?: string | null) {
@@ -569,4 +674,27 @@ export function updateTenant(id: number, input: { name: string; slug: string }) 
 
 export function deactivateTenant(id: number) {
   return request<{ ok: boolean }>(`/api/tenants/${id}`, { method: "DELETE" });
+}
+
+export function getUsageReport(days = 30, page = 1, channel?: UsageEvent["channel"] | "") {
+  const params = new URLSearchParams({ days: String(days), page: String(page), page_size: "20" });
+  if (channel) params.set("channel", channel);
+  return request<UsageReport>(`/api/usage?${params.toString()}`);
+}
+
+export function startUsageSession(input: {
+  channel: UsageEvent["channel"];
+  origin?: UsageEvent["origin"];
+  conversation_id?: string | null;
+  agent_id?: string | null;
+  source?: string | null;
+}) {
+  return request<UsageEvent>("/api/usage/sessions", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function finishUsageSession(id: number, status: "completed" | "failed" | "cancelled" = "completed") {
+  return request<UsageEvent>(`/api/usage/sessions/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({ status }),
+  });
 }

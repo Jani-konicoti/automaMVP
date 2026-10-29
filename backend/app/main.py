@@ -12,7 +12,7 @@ import sqlite3
 import time
 from collections import Counter
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
@@ -168,6 +168,49 @@ class VectorStoreSource(BaseModel):
     preview: str
 
 
+class KnowledgeDocument(BaseModel):
+    id: int
+    source: str
+    chunks: int
+    chars: int
+    preview: str
+    position: int
+    module_id: int | None
+
+
+class KnowledgeModule(BaseModel):
+    id: int
+    area_id: int
+    name: str
+    position: int
+    documents: list[KnowledgeDocument]
+
+
+class KnowledgeArea(BaseModel):
+    id: int
+    name: str
+    position: int
+    modules: list[KnowledgeModule]
+
+
+class KnowledgeTree(BaseModel):
+    areas: list[KnowledgeArea]
+    unassigned_documents: list[KnowledgeDocument]
+
+
+class KnowledgeNameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class KnowledgeModuleIn(KnowledgeNameIn):
+    area_id: int
+
+
+class KnowledgeMoveIn(BaseModel):
+    parent_id: int | None = None
+    position: int = Field(default=0, ge=0)
+
+
 class VectorSearchResult(BaseModel):
     id: int
     source: str
@@ -267,6 +310,60 @@ class OutboundCampaign(BaseModel):
 
 class OutboundCampaignPage(BaseModel):
     items: list[OutboundCampaign]
+    total: int
+    page: int
+    page_size: int
+    pages: int
+
+
+class UsageSessionIn(BaseModel):
+    channel: str = Field(pattern="^(inbound|outbound|presentation)$")
+    origin: str = Field(default="web", pattern="^(web|phone)$")
+    conversation_id: str | None = Field(default=None, max_length=180)
+    agent_id: str | None = Field(default=None, max_length=180)
+    source: str | None = Field(default=None, max_length=500)
+
+
+class UsageSessionFinishIn(BaseModel):
+    status: str = Field(default="completed", pattern="^(completed|failed|cancelled)$")
+
+
+class UsageEvent(BaseModel):
+    id: int
+    channel: str
+    origin: str
+    conversation_id: str | None
+    agent_id: str | None
+    source: str | None
+    status: str
+    duration_seconds: int
+    started_at: str
+    completed_at: str | None
+
+
+class UsageChannelStats(BaseModel):
+    channel: str
+    sessions: int
+    completed: int
+    failed: int
+    duration_seconds: int
+    average_duration_seconds: int
+
+
+class UsageDailyStats(BaseModel):
+    date: str
+    inbound: int = 0
+    outbound: int = 0
+    presentation: int = 0
+
+
+class UsageReport(BaseModel):
+    tenant_id: int
+    tenant_name: str
+    days: int
+    channels: list[UsageChannelStats]
+    daily: list[UsageDailyStats]
+    events: list[UsageEvent]
     total: int
     page: int
     page_size: int
@@ -746,6 +843,155 @@ def ensure_storage() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                origin TEXT NOT NULL DEFAULT 'web',
+                reference_key TEXT,
+                conversation_id TEXT,
+                agent_id TEXT,
+                source TEXT,
+                status TEXT NOT NULL DEFAULT 'started',
+                duration_seconds INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                metadata_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            )
+            """
+        )
+        usage_columns = {row[1] for row in conn.execute("PRAGMA table_info(usage_events)").fetchall()}
+        if "reference_key" not in usage_columns:
+            conn.execute("ALTER TABLE usage_events ADD COLUMN reference_key TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_reference ON usage_events (tenant_id, reference_key) WHERE reference_key IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_conversation ON usage_events (tenant_id, conversation_id) WHERE conversation_id IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_tenant_started ON usage_events (tenant_id, started_at DESC)"
+        )
+        conn.execute(
+            """
+            UPDATE usage_events
+            SET reference_key = 'call:' || (
+                SELECT c.id FROM outbound_calls c
+                WHERE c.tenant_id = usage_events.tenant_id
+                  AND c.conversation_id = usage_events.conversation_id
+            )
+            WHERE channel = 'outbound' AND reference_key IS NULL
+              AND conversation_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            "UPDATE usage_events SET reference_key = 'call:' || substr(reference_key, 10) WHERE reference_key LIKE 'outbound:%'"
+        )
+        conn.execute(
+            """
+            UPDATE usage_events
+            SET channel = COALESCE((
+                SELECT CASE
+                    WHEN c.contact_id IS NOT NULL OR c.campaign_id IS NOT NULL THEN 'outbound'
+                    WHEN c.agent_id = cfg.presentation_agent_id THEN 'presentation'
+                    WHEN c.agent_id = cfg.inbound_agent_id THEN 'inbound'
+                    ELSE 'outbound'
+                END
+                FROM outbound_calls c
+                LEFT JOIN tenant_configs cfg ON cfg.tenant_id = c.tenant_id
+                WHERE c.tenant_id = usage_events.tenant_id
+                  AND c.conversation_id = usage_events.conversation_id
+            ), channel)
+            WHERE reference_key IS NOT NULL AND origin = 'phone'
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO usage_events (
+                tenant_id, channel, origin, reference_key, conversation_id, agent_id, source,
+                status, duration_seconds, started_at, completed_at,
+                metadata_json, created_at, updated_at
+            )
+            SELECT c.tenant_id,
+                   CASE
+                       WHEN c.contact_id IS NOT NULL OR c.campaign_id IS NOT NULL THEN 'outbound'
+                       WHEN c.agent_id = cfg.presentation_agent_id THEN 'presentation'
+                       WHEN c.agent_id = cfg.inbound_agent_id THEN 'inbound'
+                       ELSE 'outbound'
+                   END,
+                   'phone', 'call:' || c.id, c.conversation_id, c.agent_id, c.source,
+                   CASE WHEN c.status = 'failed' THEN 'failed'
+                        WHEN c.completed_at IS NOT NULL THEN 'completed'
+                        ELSE 'started' END,
+                   CASE WHEN c.completed_at IS NOT NULL
+                        THEN MAX(0, CAST((julianday(c.completed_at) - julianday(c.created_at)) * 86400 AS INTEGER))
+                        ELSE 0 END,
+                   c.created_at, c.completed_at, NULL, c.created_at, c.updated_at
+            FROM outbound_calls c
+            LEFT JOIN tenant_configs cfg ON cfg.tenant_id = c.tenant_id
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_areas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, name)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_modules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER NOT NULL,
+                area_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, area_id, name),
+                FOREIGN KEY (area_id) REFERENCES knowledge_areas(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                module_id INTEGER,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (tenant_id, source),
+                FOREIGN KEY (module_id) REFERENCES knowledge_modules(id) ON DELETE SET NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_modules_area ON knowledge_modules (tenant_id, area_id, position)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_documents_module ON knowledge_documents (tenant_id, module_id, position)")
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO knowledge_documents (
+                tenant_id, source, module_id, position, created_at, updated_at
+            )
+            SELECT tenant_id, source, NULL, 0, MIN(created_at), ?
+            FROM vector_chunks
+            GROUP BY tenant_id, source
+            """,
+            (now,),
+        )
         behaviors_count = conn.execute("SELECT COUNT(*) FROM bot_behaviors").fetchone()[0]
         if behaviors_count == 0:
             now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -1162,6 +1408,117 @@ def row_to_outbound_call(row: sqlite3.Row) -> OutboundCall:
     )
 
 
+def row_to_usage_event(row: sqlite3.Row) -> UsageEvent:
+    return UsageEvent(
+        id=row["id"],
+        channel=row["channel"],
+        origin=row["origin"],
+        conversation_id=row["conversation_id"],
+        agent_id=row["agent_id"],
+        source=row["source"],
+        status=row["status"],
+        duration_seconds=row["duration_seconds"] or 0,
+        started_at=row["started_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+def parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.rstrip("Z"))
+    except ValueError:
+        return None
+
+
+def elapsed_seconds(started_at: str, completed_at: str) -> int:
+    started = parse_utc(started_at)
+    completed = parse_utc(completed_at)
+    if not started or not completed:
+        return 0
+    return max(0, int((completed - started).total_seconds()))
+
+
+def webhook_duration_seconds(data: dict[str, Any], started_at: str, completed_at: str) -> int:
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("call_duration_secs", "call_duration_seconds", "duration_seconds"):
+            value = metadata.get(key)
+            if isinstance(value, (int, float)):
+                return max(0, int(value))
+    return elapsed_seconds(started_at, completed_at)
+
+
+def usage_channel_for_agent(agent_id: str) -> str:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        config = conn.execute(
+            "SELECT inbound_agent_id, outbound_agent_id, presentation_agent_id FROM tenant_configs WHERE tenant_id = ?",
+            (tenant_id(),),
+        ).fetchone()
+    if config:
+        if agent_id == config["outbound_agent_id"]:
+            return "outbound"
+        if agent_id == config["presentation_agent_id"]:
+            return "presentation"
+    return "inbound"
+
+
+def upsert_usage_event(
+    conn: sqlite3.Connection,
+    *,
+    channel: str,
+    origin: str,
+    conversation_id: str | None,
+    agent_id: str | None,
+    source: str | None,
+    status: str,
+    started_at: str,
+    completed_at: str | None = None,
+    duration_seconds: int = 0,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    now = utc_now()
+    existing = None
+    if conversation_id:
+        existing = conn.execute(
+            "SELECT id, started_at, origin FROM usage_events WHERE tenant_id = ? AND conversation_id = ?",
+            (tenant_id(), conversation_id),
+        ).fetchone()
+    if existing:
+        conn.execute(
+            """
+            UPDATE usage_events
+            SET channel = ?, origin = ?, agent_id = COALESCE(?, agent_id),
+                source = COALESCE(?, source), status = ?, duration_seconds = ?,
+                completed_at = ?, metadata_json = COALESCE(?, metadata_json), updated_at = ?
+            WHERE id = ? AND tenant_id = ?
+            """,
+            (
+                channel, existing["origin"], agent_id, source, status, duration_seconds,
+                completed_at, json.dumps(metadata, ensure_ascii=False) if metadata else None,
+                now, existing["id"], tenant_id(),
+            ),
+        )
+        return existing["id"]
+    cursor = conn.execute(
+        """
+        INSERT INTO usage_events (
+            tenant_id, channel, origin, conversation_id, agent_id, source,
+            status, duration_seconds, started_at, completed_at, metadata_json,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            tenant_id(), channel, origin, conversation_id, agent_id, source,
+            status, duration_seconds, started_at, completed_at,
+            json.dumps(metadata, ensure_ascii=False) if metadata else None, now, now,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
 def row_to_outbound_campaign_item(row: sqlite3.Row) -> OutboundCampaignItem:
     return OutboundCampaignItem(
         id=row["id"],
@@ -1325,6 +1682,19 @@ def index_vector_chunks(source: str, text: str, replace_source: bool = True) -> 
             )
             inserted += 1
 
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO knowledge_documents (
+                tenant_id, source, module_id, position, created_at, updated_at
+            ) VALUES (
+                ?, ?, NULL,
+                COALESCE((SELECT MAX(position) + 1 FROM knowledge_documents WHERE tenant_id = ? AND module_id IS NULL), 0),
+                ?, ?
+            )
+            """,
+            (tenant_id(), source, tenant_id(), created_at, created_at),
+        )
+
         conn.commit()
 
     if inserted == 0:
@@ -1342,16 +1712,20 @@ def search_vector_chunks(
     if not query_vector:
         return []
 
+    sources = resolve_scope_sources(source)
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        if source:
+        if sources is not None:
+            if not sources:
+                return []
+            placeholders = ",".join("?" for _ in sources)
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, source, chunk_index, text, vector_json
                 FROM vector_chunks
-                WHERE source = ? AND tenant_id = ?
+                WHERE source IN ({placeholders}) AND tenant_id = ?
                 """,
-                (source, tenant_id()),
+                [*sources, tenant_id()],
             ).fetchall()
         else:
             rows = conn.execute(
@@ -1433,6 +1807,106 @@ def list_vector_sources() -> list[VectorStoreSource]:
     return sources
 
 
+def knowledge_document_from_row(row: sqlite3.Row) -> KnowledgeDocument:
+    return KnowledgeDocument(
+        id=row["id"],
+        source=row["source"],
+        chunks=row["chunks"] or 0,
+        chars=row["chars"] or 0,
+        preview=(row["preview"] or "")[:700],
+        position=row["position"],
+        module_id=row["module_id"],
+    )
+
+
+def get_knowledge_tree() -> KnowledgeTree:
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        area_rows = conn.execute(
+            "SELECT * FROM knowledge_areas WHERE tenant_id = ? ORDER BY position, id",
+            (tenant_id(),),
+        ).fetchall()
+        module_rows = conn.execute(
+            "SELECT * FROM knowledge_modules WHERE tenant_id = ? ORDER BY position, id",
+            (tenant_id(),),
+        ).fetchall()
+        document_rows = conn.execute(
+            """
+            SELECT d.id, d.source, d.module_id, d.position,
+                   COUNT(v.id) AS chunks, COALESCE(SUM(LENGTH(v.text)), 0) AS chars,
+                   (SELECT text FROM vector_chunks first
+                    WHERE first.tenant_id = d.tenant_id AND first.source = d.source
+                    ORDER BY first.chunk_index LIMIT 1) AS preview
+            FROM knowledge_documents d
+            LEFT JOIN vector_chunks v
+              ON v.tenant_id = d.tenant_id AND v.source = d.source
+            WHERE d.tenant_id = ?
+            GROUP BY d.id
+            ORDER BY d.position, d.id
+            """,
+            (tenant_id(),),
+        ).fetchall()
+
+    documents_by_module: dict[int, list[KnowledgeDocument]] = {}
+    unassigned: list[KnowledgeDocument] = []
+    for row in document_rows:
+        document = knowledge_document_from_row(row)
+        if document.module_id is None:
+            unassigned.append(document)
+        else:
+            documents_by_module.setdefault(document.module_id, []).append(document)
+    modules_by_area: dict[int, list[KnowledgeModule]] = {}
+    for row in module_rows:
+        module = KnowledgeModule(
+            id=row["id"], area_id=row["area_id"], name=row["name"],
+            position=row["position"], documents=documents_by_module.get(row["id"], []),
+        )
+        modules_by_area.setdefault(module.area_id, []).append(module)
+    return KnowledgeTree(
+        areas=[
+            KnowledgeArea(
+                id=row["id"], name=row["name"], position=row["position"],
+                modules=modules_by_area.get(row["id"], []),
+            )
+            for row in area_rows
+        ],
+        unassigned_documents=unassigned,
+    )
+
+
+def resolve_scope_sources(scope: str | None) -> list[str] | None:
+    normalized = scope.strip() if scope else ""
+    if not normalized:
+        return None
+    with sqlite3.connect(DB_PATH) as conn:
+        if normalized.startswith("area:") and normalized[5:].isdigit():
+            rows = conn.execute(
+                """
+                SELECT d.source FROM knowledge_documents d
+                JOIN knowledge_modules m ON m.id = d.module_id
+                WHERE m.area_id = ? AND d.tenant_id = ? AND m.tenant_id = ?
+                """,
+                (int(normalized[5:]), tenant_id(), tenant_id()),
+            ).fetchall()
+        elif normalized.startswith("module:") and normalized[7:].isdigit():
+            rows = conn.execute(
+                "SELECT source FROM knowledge_documents WHERE module_id = ? AND tenant_id = ?",
+                (int(normalized[7:]), tenant_id()),
+            ).fetchall()
+        elif normalized.startswith("document:") and normalized[9:].isdigit():
+            rows = conn.execute(
+                "SELECT source FROM knowledge_documents WHERE id = ? AND tenant_id = ?",
+                (int(normalized[9:]), tenant_id()),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT source FROM vector_chunks WHERE source = ? AND tenant_id = ?",
+                (normalized, tenant_id()),
+            ).fetchall()
+    return [row[0] for row in rows]
+
+
 def utc_now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
@@ -1452,12 +1926,7 @@ def ensure_known_source(source: str | None) -> str | None:
     if not normalized:
         return None
 
-    with sqlite3.connect(DB_PATH) as conn:
-        found = conn.execute(
-            "SELECT 1 FROM vector_chunks WHERE source = ? AND tenant_id = ? LIMIT 1",
-            (normalized, tenant_id()),
-        ).fetchone()
-    if not found:
+    if not resolve_scope_sources(normalized):
         raise HTTPException(status_code=400, detail="Fonte PDF non trovata")
     return normalized
 
@@ -1627,6 +2096,144 @@ def change_password(payload: PasswordChangeIn, request: Request) -> dict[str, bo
         )
         conn.commit()
     return {"ok": True}
+
+
+@app.post("/api/usage/sessions", response_model=UsageEvent)
+def start_usage_session(payload: UsageSessionIn, request: Request) -> UsageEvent:
+    user = request_user(request)
+    channel_allowed = {
+        "inbound": user.can_inbound,
+        "outbound": user.can_outbound,
+        "presentation": user.can_presentation,
+    }
+    if not channel_allowed[payload.channel]:
+        raise HTTPException(status_code=403, detail="Permesso modulo mancante")
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        event_id = upsert_usage_event(
+            conn,
+            channel=payload.channel,
+            origin=payload.origin,
+            conversation_id=payload.conversation_id,
+            agent_id=payload.agent_id,
+            source=payload.source,
+            status="started",
+            started_at=now,
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM usage_events WHERE id = ? AND tenant_id = ?",
+            (event_id, tenant_id()),
+        ).fetchone()
+    return row_to_usage_event(row)
+
+
+@app.put("/api/usage/sessions/{event_id}", response_model=UsageEvent)
+def finish_usage_session(event_id: int, payload: UsageSessionFinishIn, request: Request) -> UsageEvent:
+    request_user(request)
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM usage_events WHERE id = ? AND tenant_id = ?",
+            (event_id, tenant_id()),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Sessione di utilizzo non trovata")
+        duration = elapsed_seconds(row["started_at"], now)
+        conn.execute(
+            """
+            UPDATE usage_events
+            SET status = ?, duration_seconds = ?, completed_at = ?, updated_at = ?
+            WHERE id = ? AND tenant_id = ?
+            """,
+            (payload.status, duration, now, now, event_id, tenant_id()),
+        )
+        conn.commit()
+        updated = conn.execute(
+            "SELECT * FROM usage_events WHERE id = ? AND tenant_id = ?",
+            (event_id, tenant_id()),
+        ).fetchone()
+    return row_to_usage_event(updated)
+
+
+@app.get("/api/usage", response_model=UsageReport)
+def usage_report(
+    request: Request,
+    days: int = Query(default=30, ge=1, le=365),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=5, le=100),
+    channel: str | None = Query(default=None, pattern="^(inbound|outbound|presentation)$"),
+) -> UsageReport:
+    ensure_admin(request_user(request))
+    cutoff = (datetime.utcnow() - timedelta(days=days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).isoformat(timespec="seconds") + "Z"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT * FROM usage_events
+            WHERE tenant_id = ? AND started_at >= ?
+            ORDER BY started_at DESC, id DESC
+            """,
+            (tenant_id(), cutoff),
+        ).fetchall()
+
+    channel_rows: dict[str, list[sqlite3.Row]] = {
+        "inbound": [], "outbound": [], "presentation": []
+    }
+    daily_counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        if row["channel"] not in channel_rows:
+            continue
+        channel_rows[row["channel"]].append(row)
+        day = row["started_at"][:10]
+        daily_counts.setdefault(day, {"inbound": 0, "outbound": 0, "presentation": 0})
+        daily_counts[day][row["channel"]] += 1
+
+    channels: list[UsageChannelStats] = []
+    for name in ("inbound", "outbound", "presentation"):
+        values = channel_rows[name]
+        duration = sum(int(row["duration_seconds"] or 0) for row in values)
+        completed = sum(1 for row in values if row["status"] == "completed")
+        failed = sum(1 for row in values if row["status"] in {"failed", "cancelled"})
+        finished = completed + failed
+        channels.append(UsageChannelStats(
+            channel=name,
+            sessions=len(values),
+            completed=completed,
+            failed=failed,
+            duration_seconds=duration,
+            average_duration_seconds=round(duration / finished) if finished else 0,
+        ))
+
+    daily: list[UsageDailyStats] = []
+    first_day = datetime.utcnow().date() - timedelta(days=days - 1)
+    for offset in range(days):
+        date = (first_day + timedelta(days=offset)).isoformat()
+        daily.append(UsageDailyStats(date=date, **daily_counts.get(date, {})))
+
+    filtered = [row for row in rows if channel is None or row["channel"] == channel]
+    total = len(filtered)
+    pages = max(1, math.ceil(total / page_size))
+    safe_page = min(page, pages)
+    start = (safe_page - 1) * page_size
+    with sqlite3.connect(DB_PATH) as conn:
+        tenant_row = conn.execute("SELECT name FROM tenants WHERE id = ?", (tenant_id(),)).fetchone()
+    return UsageReport(
+        tenant_id=tenant_id(),
+        tenant_name=tenant_row[0] if tenant_row else "Tenant",
+        days=days,
+        channels=channels,
+        daily=daily,
+        events=[row_to_usage_event(row) for row in filtered[start:start + page_size]],
+        total=total,
+        page=safe_page,
+        page_size=page_size,
+        pages=pages,
+    )
 
 
 @app.get("/api/users", response_model=list[AuthUser])
@@ -2073,6 +2680,209 @@ def vector_store_stats() -> VectorStoreStats:
 @app.get("/api/vector-store/sources", response_model=list[VectorStoreSource])
 def vector_store_sources() -> list[VectorStoreSource]:
     return list_vector_sources()
+
+
+@app.get("/api/knowledge-tree", response_model=KnowledgeTree)
+def knowledge_tree() -> KnowledgeTree:
+    return get_knowledge_tree()
+
+
+@app.post("/api/knowledge-tree/areas", response_model=KnowledgeTree)
+def create_knowledge_area(payload: KnowledgeNameIn, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    now = utc_now()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            position = conn.execute(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM knowledge_areas WHERE tenant_id = ?",
+                (tenant_id(),),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO knowledge_areas (tenant_id, name, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (tenant_id(), payload.name.strip(), position, now, now),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Esiste gia un'area con questo nome") from exc
+    return get_knowledge_tree()
+
+
+@app.put("/api/knowledge-tree/areas/{area_id}", response_model=KnowledgeTree)
+def update_knowledge_area(area_id: int, payload: KnowledgeNameIn, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.execute(
+                "UPDATE knowledge_areas SET name = ?, updated_at = ? WHERE id = ? AND tenant_id = ?",
+                (payload.name.strip(), utc_now(), area_id, tenant_id()),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Esiste gia un'area con questo nome") from exc
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Area non trovata")
+    return get_knowledge_tree()
+
+
+@app.delete("/api/knowledge-tree/areas/{area_id}", response_model=KnowledgeTree)
+def delete_knowledge_area(area_id: int, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        module_ids = [row[0] for row in conn.execute(
+            "SELECT id FROM knowledge_modules WHERE area_id = ? AND tenant_id = ?", (area_id, tenant_id())
+        ).fetchall()]
+        if module_ids:
+            placeholders = ",".join("?" for _ in module_ids)
+            conn.execute(
+                f"UPDATE knowledge_documents SET module_id = NULL, position = 0, updated_at = ? WHERE module_id IN ({placeholders}) AND tenant_id = ?",
+                [utc_now(), *module_ids, tenant_id()],
+            )
+        scope = f"area:{area_id}"
+        conn.execute(
+            "UPDATE tenant_configs SET inbound_source = NULL WHERE tenant_id = ? AND inbound_source = ?",
+            (tenant_id(), scope),
+        )
+        conn.execute(
+            "UPDATE tenant_configs SET outbound_source = NULL WHERE tenant_id = ? AND outbound_source = ?",
+            (tenant_id(), scope),
+        )
+        conn.execute(
+            "UPDATE tenant_configs SET presentation_source = NULL WHERE tenant_id = ? AND presentation_source = ?",
+            (tenant_id(), scope),
+        )
+        conn.execute("DELETE FROM knowledge_modules WHERE area_id = ? AND tenant_id = ?", (area_id, tenant_id()))
+        cursor = conn.execute("DELETE FROM knowledge_areas WHERE id = ? AND tenant_id = ?", (area_id, tenant_id()))
+        conn.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Area non trovata")
+    return get_knowledge_tree()
+
+
+@app.post("/api/knowledge-tree/modules", response_model=KnowledgeTree)
+def create_knowledge_module(payload: KnowledgeModuleIn, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    now = utc_now()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            if not conn.execute("SELECT 1 FROM knowledge_areas WHERE id = ? AND tenant_id = ?", (payload.area_id, tenant_id())).fetchone():
+                raise HTTPException(status_code=404, detail="Area non trovata")
+            position = conn.execute(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM knowledge_modules WHERE area_id = ? AND tenant_id = ?",
+                (payload.area_id, tenant_id()),
+            ).fetchone()[0]
+            conn.execute(
+                "INSERT INTO knowledge_modules (tenant_id, area_id, name, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (tenant_id(), payload.area_id, payload.name.strip(), position, now, now),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Esiste gia un modulo con questo nome nell'area") from exc
+    return get_knowledge_tree()
+
+
+@app.put("/api/knowledge-tree/modules/{module_id}", response_model=KnowledgeTree)
+def update_knowledge_module(module_id: int, payload: KnowledgeModuleIn, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            if not conn.execute("SELECT 1 FROM knowledge_areas WHERE id = ? AND tenant_id = ?", (payload.area_id, tenant_id())).fetchone():
+                raise HTTPException(status_code=404, detail="Area non trovata")
+            cursor = conn.execute(
+                "UPDATE knowledge_modules SET name = ?, area_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?",
+                (payload.name.strip(), payload.area_id, utc_now(), module_id, tenant_id()),
+            )
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Esiste gia un modulo con questo nome nell'area") from exc
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Modulo non trovato")
+    return get_knowledge_tree()
+
+
+@app.delete("/api/knowledge-tree/modules/{module_id}", response_model=KnowledgeTree)
+def delete_knowledge_module(module_id: int, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE knowledge_documents SET module_id = NULL, position = 0, updated_at = ? WHERE module_id = ? AND tenant_id = ?",
+            (utc_now(), module_id, tenant_id()),
+        )
+        scope = f"module:{module_id}"
+        conn.execute(
+            "UPDATE tenant_configs SET inbound_source = NULL WHERE tenant_id = ? AND inbound_source = ?",
+            (tenant_id(), scope),
+        )
+        conn.execute(
+            "UPDATE tenant_configs SET outbound_source = NULL WHERE tenant_id = ? AND outbound_source = ?",
+            (tenant_id(), scope),
+        )
+        conn.execute(
+            "UPDATE tenant_configs SET presentation_source = NULL WHERE tenant_id = ? AND presentation_source = ?",
+            (tenant_id(), scope),
+        )
+        cursor = conn.execute("DELETE FROM knowledge_modules WHERE id = ? AND tenant_id = ?", (module_id, tenant_id()))
+        conn.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Modulo non trovato")
+    return get_knowledge_tree()
+
+
+def reorder_knowledge_rows(conn: sqlite3.Connection, table: str, row_id: int, parent_column: str | None, parent_id: int | None, position: int) -> None:
+    allowed = {"knowledge_areas", "knowledge_modules", "knowledge_documents"}
+    if table not in allowed:
+        raise ValueError("Invalid knowledge table")
+    parent_filter = "" if parent_column is None else f" AND {parent_column} IS ?"
+    params: list[Any] = [tenant_id()]
+    if parent_column is not None:
+        params.append(parent_id)
+    rows = [row[0] for row in conn.execute(
+        f"SELECT id FROM {table} WHERE tenant_id = ?{parent_filter} AND id != ? ORDER BY position, id",
+        [*params, row_id],
+    ).fetchall()]
+    rows.insert(min(position, len(rows)), row_id)
+    for index, current_id in enumerate(rows):
+        conn.execute(f"UPDATE {table} SET position = ?, updated_at = ? WHERE id = ? AND tenant_id = ?", (index, utc_now(), current_id, tenant_id()))
+
+
+@app.put("/api/knowledge-tree/areas/{area_id}/move", response_model=KnowledgeTree)
+def move_knowledge_area(area_id: int, payload: KnowledgeMoveIn, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        if not conn.execute("SELECT 1 FROM knowledge_areas WHERE id = ? AND tenant_id = ?", (area_id, tenant_id())).fetchone():
+            raise HTTPException(status_code=404, detail="Area non trovata")
+        reorder_knowledge_rows(conn, "knowledge_areas", area_id, None, None, payload.position)
+        conn.commit()
+    return get_knowledge_tree()
+
+
+@app.put("/api/knowledge-tree/modules/{module_id}/move", response_model=KnowledgeTree)
+def move_knowledge_module(module_id: int, payload: KnowledgeMoveIn, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    if payload.parent_id is None:
+        raise HTTPException(status_code=400, detail="Area di destinazione mancante")
+    with sqlite3.connect(DB_PATH) as conn:
+        if not conn.execute("SELECT 1 FROM knowledge_areas WHERE id = ? AND tenant_id = ?", (payload.parent_id, tenant_id())).fetchone():
+            raise HTTPException(status_code=404, detail="Area non trovata")
+        cursor = conn.execute("UPDATE knowledge_modules SET area_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?", (payload.parent_id, utc_now(), module_id, tenant_id()))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Modulo non trovato")
+        reorder_knowledge_rows(conn, "knowledge_modules", module_id, "area_id", payload.parent_id, payload.position)
+        conn.commit()
+    return get_knowledge_tree()
+
+
+@app.put("/api/knowledge-tree/documents/{document_id}/move", response_model=KnowledgeTree)
+def move_knowledge_document(document_id: int, payload: KnowledgeMoveIn, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        if payload.parent_id is not None and not conn.execute("SELECT 1 FROM knowledge_modules WHERE id = ? AND tenant_id = ?", (payload.parent_id, tenant_id())).fetchone():
+            raise HTTPException(status_code=404, detail="Modulo non trovato")
+        cursor = conn.execute("UPDATE knowledge_documents SET module_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?", (payload.parent_id, utc_now(), document_id, tenant_id()))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Documento non trovato")
+        reorder_knowledge_rows(conn, "knowledge_documents", document_id, "module_id", payload.parent_id, payload.position)
+        conn.commit()
+    return get_knowledge_tree()
 
 
 @app.post("/api/vector-store/documentation", response_model=VectorStoreStats)
@@ -3385,7 +4195,7 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
         conn.row_factory = sqlite3.Row
         existing = conn.execute(
             """
-            SELECT id, campaign_id, campaign_item_id, completed_at
+            SELECT id, campaign_id, campaign_item_id, completed_at, created_at, source
             FROM outbound_calls WHERE conversation_id = ?
             """,
             (conversation_id,),
@@ -3460,6 +4270,31 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
                     tenant_id(),
                 ),
             )
+        usage_channel = "outbound" if existing else usage_channel_for_agent(agent_id)
+        metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        metadata_started = metadata.get("start_time_unix_secs")
+        if existing:
+            usage_started_at = existing["created_at"]
+            usage_source = existing["source"]
+        elif isinstance(metadata_started, (int, float)):
+            usage_started_at = datetime.utcfromtimestamp(metadata_started).isoformat(timespec="seconds") + "Z"
+            usage_source = resolve_tool_source(conversation_id, agent_id, None)
+        else:
+            usage_started_at = now
+            usage_source = resolve_tool_source(conversation_id, agent_id, None)
+        upsert_usage_event(
+            conn,
+            channel=usage_channel,
+            origin="phone",
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            source=usage_source,
+            status="failed" if status == "failed" else "completed",
+            started_at=usage_started_at,
+            completed_at=completed_at,
+            duration_seconds=webhook_duration_seconds(data, usage_started_at, completed_at),
+            metadata=metadata,
+        )
         conn.commit()
     if campaign_to_advance:
         await advance_outbound_campaign(campaign_to_advance)
