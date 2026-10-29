@@ -936,6 +936,35 @@ def ensure_storage() -> None:
             LEFT JOIN tenant_configs cfg ON cfg.tenant_id = c.tenant_id
             """
         )
+        historical_usage_rows = conn.execute(
+            """
+            SELECT u.id, c.transcript_json
+            FROM usage_events u
+            JOIN outbound_calls c
+              ON c.tenant_id = u.tenant_id AND c.conversation_id = u.conversation_id
+            WHERE u.origin = 'phone' AND u.metadata_json IS NULL
+              AND u.reference_key LIKE 'call:%'
+            """
+        ).fetchall()
+        for usage_id, transcript_json in historical_usage_rows:
+            transcript_duration = 0
+            try:
+                transcript_entries = json.loads(transcript_json) if transcript_json else []
+                transcript_duration = max(
+                    (
+                        int(entry.get("time_in_call_secs", 0))
+                        for entry in transcript_entries
+                        if isinstance(entry, dict)
+                        and isinstance(entry.get("time_in_call_secs"), (int, float))
+                    ),
+                    default=0,
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                transcript_duration = 0
+            conn.execute(
+                "UPDATE usage_events SET duration_seconds = ? WHERE id = ?",
+                (transcript_duration, usage_id),
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS knowledge_areas (
