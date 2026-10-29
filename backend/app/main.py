@@ -816,6 +816,14 @@ def ensure_storage() -> None:
             "outbound_campaign_items",
         ):
             add_tenant_column(conn, table)
+        conn.execute(
+            """
+            UPDATE elevenlabs_agents
+            SET tenant_id = CAST(updated_at AS INTEGER), updated_at = created_at
+            WHERE CAST(updated_at AS INTEGER) IN (SELECT id FROM tenants)
+              AND CAST(tenant_id AS TEXT) LIKE '____-__-__T%'
+            """
+        )
         user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "tenant_id" not in user_columns:
             conn.execute("ALTER TABLE users ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1")
@@ -3104,8 +3112,8 @@ def create_elevenlabs_agent(payload: ElevenLabsAgentIn) -> ElevenLabsAgent:
                 payload.agent_id.strip(),
                 1 if agents_count == 0 else 0,
                 now,
-                tenant_id(),
                 now,
+                tenant_id(),
             ),
         )
         conn.commit()
