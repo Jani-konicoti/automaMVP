@@ -3089,6 +3089,7 @@ function VectorSourceSelector({
   const [deleting, setDeleting] = useState<{ kind: "area" | "module"; id: number; name: string } | null>(null);
   const [dropTargetAreaId, setDropTargetAreaId] = useState<number | null>(null);
   const draggedItem = useRef<{ kind: "areas" | "modules" | "documents"; id: number } | null>(null);
+  const knowledgeTreeRef = useRef<HTMLDivElement>(null);
 
   const documentCount = (areaId: number) => tree.areas.find((area) => area.id === areaId)?.modules.reduce((sum, module) => sum + module.documents.length, 0) ?? 0;
   const runTreeAction = async (action: () => Promise<KnowledgeTree>) => {
@@ -3133,6 +3134,13 @@ function VectorSourceSelector({
       return moveKnowledgeItem("documents", dragged.id, targetModule.id, targetModule.documents.length);
     });
   };
+  const autoScrollTree = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!isManaging || !knowledgeTreeRef.current) return;
+    const bounds = knowledgeTreeRef.current.getBoundingClientRect();
+    const edgeSize = 64;
+    if (event.clientY < bounds.top + edgeSize) knowledgeTreeRef.current.scrollBy({ top: -18 });
+    else if (event.clientY > bounds.bottom - edgeSize) knowledgeTreeRef.current.scrollBy({ top: 18 });
+  };
 
   return (
     <div className={`knowledge-selector${isManaging ? " managing" : ""}`}>
@@ -3140,7 +3148,19 @@ function VectorSourceSelector({
         <div><strong>Ambito della conoscenza</strong><span>{knowledgeScopeLabel(selectedSource, tree)}</span></div>
         {canManage && <button className={`small-button${isManaging ? " primary" : ""}`} type="button" onClick={() => setIsManaging((value) => !value)}><GripVertical size={15} />{isManaging ? "Fine" : "Organizza"}</button>}
       </div>
-      <div className="vector-sources knowledge-tree">
+      <div className="vector-sources knowledge-tree" ref={knowledgeTreeRef} onDragOver={autoScrollTree}>
+      {isManaging && tree.areas.length > 0 && <div className="knowledge-drop-shelf">
+        <span>Trascina nell'area</span>
+        <div>{tree.areas.map((area) => <button
+          className={dropTargetAreaId === area.id ? "active" : ""}
+          key={area.id}
+          type="button"
+          onDragEnter={() => { if (draggedItem.current?.kind === "documents") setDropTargetAreaId(area.id); }}
+          onDragLeave={() => setDropTargetAreaId((current) => current === area.id ? null : current)}
+          onDragOver={(event) => { if (draggedItem.current?.kind === "documents") { event.preventDefault(); event.stopPropagation(); setDropTargetAreaId(area.id); } }}
+          onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void moveDocumentToArea(area.id); }}
+        ><Folder size={14} />{area.name}</button>)}</div>
+      </div>}
       <label className="vector-source-option all-sources">
         <input
           checked={selectedSource === null}
@@ -3198,6 +3218,7 @@ type EmbeddedSourceOption = {
   label: string;
   context: string;
   kind: "all" | "area" | "module" | "document";
+  depth: 0 | 1 | 2;
 };
 
 function EmbeddedSourcePicker({
@@ -3223,23 +3244,23 @@ function EmbeddedSourcePicker({
     for (const area of tree.areas) {
       const areaDocuments = area.modules.flatMap((module) => module.documents);
       const options: EmbeddedSourceOption[] = [];
-      if (areaDocuments.length > 0) options.push({ value: `area:${area.id}`, label: area.name, context: `${areaDocuments.length} documenti`, kind: "area" });
+      if (areaDocuments.length > 0) options.push({ value: `area:${area.id}`, label: area.name, context: `${areaDocuments.length} documenti`, kind: "area", depth: 0 });
       for (const module of area.modules) {
-        if (module.documents.length > 0) options.push({ value: `module:${module.id}`, label: module.name, context: `${area.name} · ${module.documents.length} documenti`, kind: "module" });
-        for (const document of module.documents) options.push({ value: `document:${document.id}`, label: document.source, context: `${area.name} · ${module.name}`, kind: "document" });
+        if (module.documents.length > 0) options.push({ value: `module:${module.id}`, label: module.name, context: `${module.documents.length} documenti`, kind: "module", depth: 1 });
+        for (const document of module.documents) options.push({ value: `document:${document.id}`, label: document.source, context: `${area.name} · ${module.name}`, kind: "document", depth: 2 });
       }
       if (options.length > 0) nextGroups.push({ label: area.name, options });
     }
     if (tree.unassigned_documents.length > 0) {
       nextGroups.push({
         label: "Documenti non organizzati",
-        options: tree.unassigned_documents.map((document) => ({ value: `document:${document.id}`, label: document.source, context: "Documento", kind: "document" })),
+        options: tree.unassigned_documents.map((document) => ({ value: `document:${document.id}`, label: document.source, context: "Documento", kind: "document", depth: 0 })),
       });
     }
     if (nextGroups.length === 0 && sources.length > 0) {
       nextGroups.push({
         label: "Documenti",
-        options: sources.map((source) => ({ value: source.source, label: source.source, context: "Documento", kind: "document" })),
+        options: sources.map((source) => ({ value: source.source, label: source.source, context: "Documento", kind: "document", depth: 0 })),
       });
     }
     return nextGroups;
@@ -3297,9 +3318,9 @@ function EmbeddedSourcePicker({
         {!normalizedQuery && <button aria-selected={selectedSource === null} className={selectedSource === null ? "selected" : ""} role="option" type="button" onClick={() => selectOption(null)}>
           <span className="embedded-source-icon all"><Database size={16} /></span><span><strong>Tutte le fonti</strong><small>Usa tutta la documentazione disponibile</small></span>{selectedSource === null && <Check size={16} />}
         </button>}
-        {filteredGroups.map((group) => <section key={group.label}>
-          <header>{group.label}</header>
-          {group.options.map((option) => <button aria-selected={selectedSource === option.value} className={selectedSource === option.value ? "selected" : ""} key={`${option.kind}-${option.value}`} role="option" type="button" onClick={() => selectOption(option.value)}>
+        {filteredGroups.map((group) => <section className={group.options.some((option) => option.kind === "area") ? "embedded-source-tree-group" : ""} key={group.label}>
+          {group.options[0]?.label !== group.label && <header>{group.label}</header>}
+          {group.options.map((option) => <button aria-selected={selectedSource === option.value} className={`${selectedSource === option.value ? "selected " : ""}depth-${normalizedQuery ? 0 : option.depth}`} key={`${option.kind}-${option.value}`} role="option" type="button" onClick={() => selectOption(option.value)}>
             <span className={`embedded-source-icon ${option.kind}`}>{optionIcon(option.kind)}</span><span><strong>{option.label}</strong><small>{option.kind === "area" ? "Area" : option.kind === "module" ? "Modulo" : option.context}</small></span>{selectedSource === option.value && <Check size={16} />}
           </button>)}
         </section>)}

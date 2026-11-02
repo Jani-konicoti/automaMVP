@@ -1796,7 +1796,26 @@ def search_vector_chunks(
         )
 
     scored.sort(key=lambda item: item.score, reverse=True)
-    return scored[:limit]
+    if sources is None or len(sources) < 2:
+        return scored[:limit]
+
+    diversified: list[VectorSearchResult] = []
+    represented_sources: set[str] = set()
+    for item in scored:
+        if item.source in represented_sources:
+            continue
+        diversified.append(item)
+        represented_sources.add(item.source)
+        if len(diversified) == limit:
+            return diversified
+
+    selected_ids = {item.id for item in diversified}
+    for item in scored:
+        if item.id not in selected_ids:
+            diversified.append(item)
+        if len(diversified) == limit:
+            break
+    return diversified
 
 
 def get_vector_store_stats() -> VectorStoreStats:
