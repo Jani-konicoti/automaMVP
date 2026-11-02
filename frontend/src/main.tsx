@@ -3087,6 +3087,7 @@ function VectorSourceSelector({
   const [isBusy, setIsBusy] = useState(false);
   const [editor, setEditor] = useState<{ kind: "area" | "module"; id?: number; parentId?: number; name: string } | null>(null);
   const [deleting, setDeleting] = useState<{ kind: "area" | "module"; id: number; name: string } | null>(null);
+  const [dropTargetAreaId, setDropTargetAreaId] = useState<number | null>(null);
   const draggedItem = useRef<{ kind: "areas" | "modules" | "documents"; id: number } | null>(null);
 
   const documentCount = (areaId: number) => tree.areas.find((area) => area.id === areaId)?.modules.reduce((sum, module) => sum + module.documents.length, 0) ?? 0;
@@ -3116,6 +3117,22 @@ function VectorSourceSelector({
     draggedItem.current = null;
     await runTreeAction(() => moveKnowledgeItem(kind, dragged.id, parentId, position));
   };
+  const moveDocumentToArea = async (areaId: number) => {
+    const dragged = draggedItem.current;
+    if (!dragged || dragged.kind !== "documents") return;
+    draggedItem.current = null;
+    setDropTargetAreaId(null);
+    await runTreeAction(async () => {
+      let nextTree = tree;
+      let targetModule = nextTree.areas.find((area) => area.id === areaId)?.modules.find((module) => module.name.toLocaleLowerCase("it") === "documenti");
+      if (!targetModule) {
+        nextTree = await createKnowledgeModule(areaId, "Documenti");
+        targetModule = nextTree.areas.find((area) => area.id === areaId)?.modules.find((module) => module.name.toLocaleLowerCase("it") === "documenti");
+      }
+      if (!targetModule) throw new Error("Impossibile creare il modulo Documenti nell'area selezionata");
+      return moveKnowledgeItem("documents", dragged.id, targetModule.id, targetModule.documents.length);
+    });
+  };
 
   return (
     <div className={`knowledge-selector${isManaging ? " managing" : ""}`}>
@@ -3137,12 +3154,14 @@ function VectorSourceSelector({
         </span>
       </label>
       {tree.areas.map((area, areaIndex) => <section
-        className="knowledge-area"
+        className={`knowledge-area${dropTargetAreaId === area.id ? " drop-target" : ""}`}
         draggable={isManaging}
         key={area.id}
         onDragStart={() => { draggedItem.current = { kind: "areas", id: area.id }; }}
-        onDragOver={(event) => { if (isManaging) event.preventDefault(); }}
-        onDrop={() => { const dragged = draggedItem.current; if (dragged?.kind === "modules") void moveDragged("modules", area.id, area.modules.length); else void moveDragged("areas", null, areaIndex); }}
+        onDragEnd={() => setDropTargetAreaId(null)}
+        onDragOver={(event) => { if (isManaging) { event.preventDefault(); if (draggedItem.current?.kind === "documents") setDropTargetAreaId(area.id); } }}
+        onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTargetAreaId(null); }}
+        onDrop={(event) => { event.preventDefault(); setDropTargetAreaId(null); const dragged = draggedItem.current; if (dragged?.kind === "documents") void moveDocumentToArea(area.id); else if (dragged?.kind === "modules") void moveDragged("modules", area.id, area.modules.length); else void moveDragged("areas", null, areaIndex); }}
       >
         <header>
           {isManaging && <GripVertical className="drag-handle" size={16} />}
@@ -3161,7 +3180,7 @@ function VectorSourceSelector({
             <header>{isManaging && <GripVertical className="drag-handle" size={15} />}<label><input checked={selectedSource === `module:${module.id}`} disabled={module.documents.length === 0} name={name} type="radio" onChange={() => onChange(`module:${module.id}`)} /><strong>{module.name}</strong><span>{module.documents.length}</span></label>{isManaging && <div className="knowledge-actions"><button title="Rinomina modulo" type="button" onClick={() => setEditor({ kind: "module", id: module.id, parentId: area.id, name: module.name })}><Pencil size={14} /></button><button title="Elimina modulo" type="button" onClick={() => setDeleting({ kind: "module", id: module.id, name: module.name })}><Trash2 size={14} /></button></div>}</header>
             <div className="knowledge-documents">{module.documents.map((document, documentIndex) => <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={(event) => { event.stopPropagation(); draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", module.id, documentIndex); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>)}</div>
           </section>)}
-          {area.modules.length === 0 && <p className="knowledge-empty">Nessun modulo in quest'area.</p>}
+          {area.modules.length === 0 && <p className="knowledge-empty">{isManaging ? "Trascina qui un documento oppure crea un modulo." : "Nessun modulo in quest'area."}</p>}
         </div>
       </section>)}
       {tree.unassigned_documents.length > 0 && <section className="knowledge-unassigned" onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={() => void moveDragged("documents", null, tree.unassigned_documents.length)}><header><strong>Non organizzati</strong><span>{tree.unassigned_documents.length}</span></header>{tree.unassigned_documents.map((document, index) => <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={() => { draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", null, index); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>)}</section>}
