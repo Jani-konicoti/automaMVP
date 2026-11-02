@@ -108,7 +108,6 @@ import {
   saveElevenLabsConfig,
   saveElevenLabsDefaults,
   saveElevenLabsIntegration,
-  saveFlowSource,
   searchVectorStore,
   updateElevenLabsAgent,
   updateOutboundContact,
@@ -469,18 +468,9 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         setKnowledgeTree(tree);
         setOutboundContacts(contacts);
         setOutboundCalls(calls);
-        const sourceExists = (source?: string | null) => Boolean(source && knowledgeScopeExists(source, tree, sources));
-        setInboundVectorSource(
-          sourceExists(configResponse.inbound_source) ? configResponse.inbound_source! : null,
-        );
-        setOutboundVectorSource(
-          sourceExists(configResponse.outbound_source) ? configResponse.outbound_source! : null,
-        );
-        setPresentationVectorSource(
-          sourceExists(configResponse.presentation_source)
-            ? configResponse.presentation_source!
-            : null,
-        );
+        setInboundVectorSource(null);
+        setOutboundVectorSource(null);
+        setPresentationVectorSource(null);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Errore di inizializzazione");
       } finally {
@@ -544,23 +534,6 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         post_call_webhook_secret: postCallWebhookSecret,
       });
       setElevenLabsConfig(config);
-    },
-    [],
-  );
-
-  const persistFlowSource = useCallback(
-    async (
-      flow: MainTab,
-      source: string | null,
-      setter: (value: string | null) => void,
-    ) => {
-      setter(source);
-      try {
-        const config = await saveFlowSource(flow, source);
-        setElevenLabsConfig(config);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Salvataggio fonte fallito");
-      }
     },
     [],
   );
@@ -790,15 +763,9 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
         onPdfModeChange={setPdfMode}
         onVectorPdfUpload={handleVectorPdfUpload}
         onKnowledgeTreeChange={handleKnowledgeTreeChange}
-        onInboundVectorSourceChange={(source) =>
-          void persistFlowSource("centralino-entrata", source, setInboundVectorSource)
-        }
-        onOutboundVectorSourceChange={(source) =>
-          void persistFlowSource("centralino-uscita", source, setOutboundVectorSource)
-        }
-        onPresentationVectorSourceChange={(source) =>
-          void persistFlowSource("presentazione", source, setPresentationVectorSource)
-        }
+        onInboundVectorSourceChange={setInboundVectorSource}
+        onOutboundVectorSourceChange={setOutboundVectorSource}
+        onPresentationVectorSourceChange={setPresentationVectorSource}
         onSetError={setError}
         onVoiceContextChange={handleVoiceContextChange}
         pdfMode={pdfMode}
@@ -3971,6 +3938,7 @@ function VoicePanel({
   const { status } = useConversationStatus();
   const { mode } = useConversationMode();
   const [isStarting, setIsStarting] = useState(false);
+  const [isUsageScopeReady, setIsUsageScopeReady] = useState(false);
   const [inputVolume, setInputVolume] = useState(0);
   const [textMessage, setTextMessage] = useState("");
   const [connectionMode, setConnectionMode] = useState<"webrtc" | "websocket">("webrtc");
@@ -4014,6 +3982,7 @@ function VoicePanel({
       hasSentContextRef.current = false;
       hasSentStartPromptRef.current = false;
       lastContextUpdateRef.current = "";
+      setIsUsageScopeReady(false);
       return;
     }
 
@@ -4048,7 +4017,7 @@ function VoicePanel({
   ]);
 
   useEffect(() => {
-    if (!isConnected || !startPrompt || hasSentStartPromptRef.current) {
+    if (!isConnected || !isUsageScopeReady || !startPrompt || hasSentStartPromptRef.current) {
       return;
     }
 
@@ -4058,7 +4027,7 @@ function VoicePanel({
     }, 1200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [isConnected, sendUserMessage, startPrompt]);
+  }, [isConnected, isUsageScopeReady, sendUserMessage, startPrompt]);
 
   useEffect(() => {
     if (!isConnected) {
@@ -4103,6 +4072,7 @@ function VoicePanel({
     }
 
     setIsStarting(true);
+    setIsUsageScopeReady(false);
     try {
       onBeforeStart?.();
       onVoiceContextChange(contextMode);
@@ -4113,6 +4083,7 @@ function VoicePanel({
         const started = await startSession({
           conversationToken: response.token,
           connectionType: "webrtc",
+          dynamicVariables: { knowledge_source: selectedVectorSource ?? "" },
           textOnly: false,
         });
         conversationId = typeof started === "string" ? started : null;
@@ -4121,18 +4092,21 @@ function VoicePanel({
         const started = await startSession({
           signedUrl: response.signed_url,
           connectionType: "websocket",
+          dynamicVariables: { knowledge_source: selectedVectorSource ?? "" },
           textOnly: false,
         });
         conversationId = typeof started === "string" ? started : null;
       }
       const channel = contextMode === "centralino-entrata" ? "inbound" : contextMode === "centralino-uscita" ? "outbound" : "presentation";
       usageSessionActiveRef.current = true;
-      startUsageSession({ channel, origin: "web", conversation_id: conversationId, agent_id: effectiveAgentId, source: selectedVectorSource })
-        .then((event) => {
-          if (usageSessionActiveRef.current) usageEventIdRef.current = event.id;
-          else void finishUsageSession(event.id, "completed");
-        })
-        .catch((error) => console.warn("Usage session start failed", error));
+      try {
+        const event = await startUsageSession({ channel, origin: "web", conversation_id: conversationId, agent_id: effectiveAgentId, source: selectedVectorSource });
+        if (usageSessionActiveRef.current) usageEventIdRef.current = event.id;
+        else await finishUsageSession(event.id, "completed");
+      } catch (error) {
+        console.warn("Usage session start failed", error);
+      }
+      setIsUsageScopeReady(true);
     } catch (err) {
       onVoiceContextChange(null);
       onSetError(err instanceof Error ? err.message : "Avvio sessione fallito");

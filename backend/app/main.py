@@ -2025,6 +2025,9 @@ def resolve_tool_source(
                 ).fetchone()
         if row and row[0]:
             return row[0]
+        # Never inherit a tenant-wide source while a scoped web conversation
+        # is waiting to be registered.
+        return None
 
     if not agent_id:
         return None
@@ -2037,6 +2040,8 @@ def resolve_tool_source(
     )
     for configured_agent_id, source in agent_source_pairs:
         if configured_agent_id == agent_id:
+            if configured_agent_id == config.presentation_agent_id:
+                return None
             return source
     return None
 
