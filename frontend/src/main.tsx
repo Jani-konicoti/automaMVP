@@ -17,6 +17,7 @@ import {
   CalendarClock,
   Check,
   Circle,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Database,
@@ -3173,6 +3174,122 @@ function VectorSourceSelector({
   );
 }
 
+type EmbeddedSourceOption = {
+  value: string | null;
+  label: string;
+  context: string;
+  kind: "all" | "area" | "module" | "document";
+};
+
+function EmbeddedSourcePicker({
+  disabled,
+  onChange,
+  selectedSource,
+  sources,
+  tree,
+}: {
+  disabled: boolean;
+  onChange: (source: string | null) => void;
+  selectedSource: string | null | undefined;
+  sources: VectorStoreSource[];
+  tree: KnowledgeTree;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  const groups = useMemo(() => {
+    const nextGroups: Array<{ label: string; options: EmbeddedSourceOption[] }> = [];
+    for (const area of tree.areas) {
+      const areaDocuments = area.modules.flatMap((module) => module.documents);
+      const options: EmbeddedSourceOption[] = [];
+      if (areaDocuments.length > 0) options.push({ value: `area:${area.id}`, label: area.name, context: `${areaDocuments.length} documenti`, kind: "area" });
+      for (const module of area.modules) {
+        if (module.documents.length > 0) options.push({ value: `module:${module.id}`, label: module.name, context: `${area.name} · ${module.documents.length} documenti`, kind: "module" });
+        for (const document of module.documents) options.push({ value: `document:${document.id}`, label: document.source, context: `${area.name} · ${module.name}`, kind: "document" });
+      }
+      if (options.length > 0) nextGroups.push({ label: area.name, options });
+    }
+    if (tree.unassigned_documents.length > 0) {
+      nextGroups.push({
+        label: "Documenti non organizzati",
+        options: tree.unassigned_documents.map((document) => ({ value: `document:${document.id}`, label: document.source, context: "Documento", kind: "document" })),
+      });
+    }
+    if (nextGroups.length === 0 && sources.length > 0) {
+      nextGroups.push({
+        label: "Documenti",
+        options: sources.map((source) => ({ value: source.source, label: source.source, context: "Documento", kind: "document" })),
+      });
+    }
+    return nextGroups;
+  }, [sources, tree]);
+
+  const normalizedQuery = query.trim().toLocaleLowerCase("it");
+  const filteredGroups = useMemo(() => groups.map((group) => ({
+    ...group,
+    options: group.options.filter((option) => !normalizedQuery || `${option.label} ${option.context} ${group.label}`.toLocaleLowerCase("it").includes(normalizedQuery)),
+  })).filter((group) => group.options.length > 0), [groups, normalizedQuery]);
+
+  const selectedOption = groups.flatMap((group) => group.options).find((option) => option.value === selectedSource);
+  const selectedLabel = selectedSource === undefined ? "Seleziona una fonte" : selectedSource === null ? "Tutte le fonti" : selectedOption?.label ?? knowledgeScopeLabel(selectedSource, tree);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setIsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    window.setTimeout(() => searchRef.current?.focus(), 0);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isOpen]);
+
+  const selectOption = (value: string | null) => {
+    onChange(value);
+    setIsOpen(false);
+    setQuery("");
+  };
+
+  const optionIcon = (kind: EmbeddedSourceOption["kind"]) => kind === "document" ? <BookOpen size={16} /> : kind === "all" ? <Database size={16} /> : <Folder size={16} />;
+
+  return <div className={`embedded-source-picker${isOpen ? " open" : ""}`} ref={pickerRef}>
+    <button
+      aria-expanded={isOpen}
+      aria-haspopup="listbox"
+      className="embedded-source-trigger"
+      disabled={disabled}
+      type="button"
+      onClick={() => setIsOpen((current) => !current)}
+    >
+      <span><Search size={17} /><span><small>Fonte selezionata</small><strong>{selectedLabel}</strong></span></span>
+      <ChevronDown size={18} />
+    </button>
+    {isOpen && <div className="embedded-source-popover">
+      <label className="embedded-source-search"><Search size={16} /><input ref={searchRef} aria-label="Cerca una fonte" placeholder="Cerca documento, modulo o area..." value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+      <div className="embedded-source-results" role="listbox" aria-label="Fonti della presentazione">
+        {!normalizedQuery && <button aria-selected={selectedSource === null} className={selectedSource === null ? "selected" : ""} role="option" type="button" onClick={() => selectOption(null)}>
+          <span className="embedded-source-icon all"><Database size={16} /></span><span><strong>Tutte le fonti</strong><small>Usa tutta la documentazione disponibile</small></span>{selectedSource === null && <Check size={16} />}
+        </button>}
+        {filteredGroups.map((group) => <section key={group.label}>
+          <header>{group.label}</header>
+          {group.options.map((option) => <button aria-selected={selectedSource === option.value} className={selectedSource === option.value ? "selected" : ""} key={`${option.kind}-${option.value}`} role="option" type="button" onClick={() => selectOption(option.value)}>
+            <span className={`embedded-source-icon ${option.kind}`}>{optionIcon(option.kind)}</span><span><strong>{option.label}</strong><small>{option.kind === "area" ? "Area" : option.kind === "module" ? "Modulo" : option.context}</small></span>{selectedSource === option.value && <Check size={16} />}
+          </button>)}
+        </section>)}
+        {filteredGroups.length === 0 && normalizedQuery && <div className="embedded-source-empty"><Search size={20} /><strong>Nessuna fonte trovata</strong><span>Prova con un nome diverso.</span></div>}
+      </div>
+    </div>}
+  </div>;
+}
+
 function EmbeddedPresentationApp({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () => Promise<void> }) {
   const [config, setConfig] = useState<ElevenLabsConfig | null>(null);
   const [tree, setTree] = useState<KnowledgeTree>({ areas: [], unassigned_documents: [] });
@@ -3229,30 +3346,13 @@ function EmbeddedPresentationApp({ currentUser, onLogout }: { currentUser: AuthU
     ?? config?.agents[0]?.agent_id
     ?? null;
   const presentationAgent = config?.agents.find((agent) => agent.agent_id === presentationAgentId);
-  const optionGroups = tree.areas.map((area) => ({
-    area,
-    documents: area.modules.flatMap((module) => module.documents),
-  }));
-
   return <ConversationProvider {...providerConfig}>
     <main className="embedded-presentation">
       <header className="embedded-header"><div><span className="embedded-brand-mark">CP</span><div><strong>CP AGENT</strong><small>Presentazione assistita</small></div></div><button className="icon-button" title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button></header>
       {error && <div className="error-banner"><span>{error}</span><button type="button" onClick={() => setError(null)}>Chiudi</button></div>}
       <section className="embedded-source-step">
         <div className="embedded-step-heading"><span>1</span><div><strong>Scegli la fonte</strong><small>Seleziona il contenuto da presentare.</small></div></div>
-        <select aria-label="Fonte della presentazione" disabled={isActive} value={selectedSource === undefined ? "" : selectedSource ?? "__all__"} onChange={(event) => setSelectedSource(event.target.value === "" ? undefined : event.target.value === "__all__" ? null : event.target.value)}>
-          <option value="">Seleziona una fonte...</option>
-          <option value="__all__">Tutte le fonti</option>
-          {optionGroups.map(({ area }) => <optgroup key={area.id} label={`Area: ${area.name}`}>
-            {area.modules.length > 0 && <option disabled={area.modules.every((module) => module.documents.length === 0)} value={`area:${area.id}`}>Intera area - {area.name}</option>}
-            {area.modules.flatMap((module) => [
-              <option disabled={module.documents.length === 0} key={`module:${module.id}`} value={`module:${module.id}`}>Modulo - {module.name}</option>,
-              ...module.documents.map((document) => <option key={`document:${document.id}`} value={`document:${document.id}`}>Documento - {document.source}</option>),
-            ])}
-          </optgroup>)}
-          {tree.unassigned_documents.length > 0 && <optgroup label="Documenti non organizzati">{tree.unassigned_documents.map((document) => <option key={`document:${document.id}`} value={`document:${document.id}`}>{document.source}</option>)}</optgroup>}
-          {tree.areas.length === 0 && tree.unassigned_documents.length === 0 && sources.map((source) => <option key={source.source} value={source.source}>{source.source}</option>)}
-        </select>
+        <EmbeddedSourcePicker disabled={isActive} onChange={setSelectedSource} selectedSource={selectedSource} sources={sources} tree={tree} />
       </section>
       {selectedSource !== undefined && config ? <section className="embedded-active-step">
         <div className="embedded-step-heading"><span>2</span><div><strong>{isActive ? "Presentazione in corso" : "Avvia la presentazione"}</strong><small>{selectedLabel}</small></div></div>
