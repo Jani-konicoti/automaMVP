@@ -8,6 +8,7 @@ services:
     environment:
       FRONTEND_ORIGIN: ${APP_URL:-http://localhost:8080}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      COOKIE_SAMESITE: ${COOKIE_SAMESITE:-lax}
       ELEVENLABS_VERIFY_SSL: ${ELEVENLABS_VERIFY_SSL:-true}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-Cambiami24!}
       PUBLIC_BASE_URL: ${APP_URL:-http://localhost:8080}
@@ -40,6 +41,8 @@ services:
     build:
       context: ./frontend
     restart: unless-stopped
+    environment:
+      IFRAME_ANCESTORS: ${IFRAME_ANCESTORS:-'self'}
     depends_on:
       backend:
         condition: service_healthy

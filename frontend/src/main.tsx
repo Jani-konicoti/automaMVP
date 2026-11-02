@@ -137,6 +137,35 @@ type MainTab = "centralino-entrata" | "centralino-uscita" | "presentazione";
 type VoiceContext = MainTab;
 type NavigationPage = MainTab | "config" | "users" | "tenants" | "usage";
 type OutboundSection = "operations" | "test" | "sources" | "appointments" | "events";
+type EmbeddedPresentationState = "idle" | "logged-in" | "pdf-selected" | "active";
+
+const isEmbeddedPresentation = window.location.pathname.replace(/\/$/, "") === "/presentazione-cpeople";
+let lastEmbeddedPresentationMessage = "";
+
+function embeddedParentOrigin() {
+  const configured = new URLSearchParams(window.location.search).get("parentOrigin");
+  if (configured) {
+    try { return new URL(configured).origin; } catch { /* Fall back to the referrer. */ }
+  }
+  if (document.referrer) {
+    try { return new URL(document.referrer).origin; } catch { /* Use wildcard only for local testing. */ }
+  }
+  return "*";
+}
+
+function postEmbeddedPresentationState(state: EmbeddedPresentationState, details: Record<string, unknown> = {}) {
+  if (window.parent === window) return;
+  const message = {
+    source: "cp-agent",
+    type: "cp-agent:presentation-state",
+    state,
+    ...details,
+  };
+  const signature = JSON.stringify(message);
+  if (signature === lastEmbeddedPresentationMessage) return;
+  lastEmbeddedPresentationMessage = signature;
+  window.parent.postMessage(message, embeddedParentOrigin());
+}
 
 function navigationPageFromHash(): NavigationPage {
   const page = window.location.hash.replace(/^#/, "");
@@ -3144,6 +3173,109 @@ function VectorSourceSelector({
   );
 }
 
+function EmbeddedPresentationApp({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () => Promise<void> }) {
+  const [config, setConfig] = useState<ElevenLabsConfig | null>(null);
+  const [tree, setTree] = useState<KnowledgeTree>({ areas: [], unassigned_documents: [] });
+  const [sources, setSources] = useState<VectorStoreSource[]>([]);
+  const [selectedSource, setSelectedSource] = useState<string | null | undefined>(undefined);
+  const [isActive, setIsActive] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canUsePrincipalTenant = currentUser.tenant_id === 1 || currentUser.role === "superadmin";
+
+  useEffect(() => {
+    if (!canUsePrincipalTenant) return;
+    Promise.all([getElevenLabsConfig(), getKnowledgeTree(), getVectorStoreSources()])
+      .then(([nextConfig, nextTree, nextSources]) => {
+        setConfig(nextConfig);
+        setTree(nextTree);
+        setSources(nextSources);
+      })
+      .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Caricamento presentazione fallito"));
+  }, [canUsePrincipalTenant]);
+
+  const selectedLabel = selectedSource === undefined ? null : knowledgeScopeLabel(selectedSource, tree);
+  useEffect(() => {
+    const state: EmbeddedPresentationState = isActive
+      ? "active"
+      : !canUsePrincipalTenant || selectedSource === undefined
+        ? "logged-in"
+        : "pdf-selected";
+    postEmbeddedPresentationState(state, selectedLabel ? { knowledgeSource: selectedSource, knowledgeSourceLabel: selectedLabel } : {});
+  }, [canUsePrincipalTenant, isActive, selectedLabel, selectedSource]);
+
+  const searchKnowledge = useCallback(async (input: { query?: string; limit?: number }) => {
+    const query = input.query?.trim();
+    if (!query) return "Query mancante. Specifica cosa cercare nella documentazione.";
+    const response = await searchVectorStore(query, Math.min(Math.max(input.limit ?? 4, 1), 6), selectedSource ?? null);
+    if (response.results.length === 0) return `Nessun risultato trovato per: ${query}`;
+    return response.results.map((result, index) => `RISULTATO ${index + 1}\nFonte: ${result.source}\nTesto:\n${result.text}`).join("\n\n---\n\n");
+  }, [selectedSource]);
+
+  const providerConfig = useMemo(() => ({
+    clientTools: { searchKnowledge },
+    onError: (message: unknown) => setError(readableEvent(message)),
+  }), [searchKnowledge]);
+
+  if (!canUsePrincipalTenant) {
+    return <main className="embedded-presentation"><section className="embedded-message"><Presentation size={24} /><h1>Tenant non autorizzato</h1><p>Questa presentazione utilizza esclusivamente il tenant principale.</p><button className="secondary-button" type="button" onClick={() => void onLogout()}>Esci</button></section></main>;
+  }
+
+  if (!currentUser.can_presentation) {
+    return <main className="embedded-presentation"><section className="embedded-message"><Presentation size={24} /><h1>Presentazione non disponibile</h1><p>Questo utente non dispone del permesso Presentazione.</p><button className="secondary-button" type="button" onClick={() => void onLogout()}>Esci</button></section></main>;
+  }
+
+  const presentationAgentId = config?.presentation_agent_id
+    ?? config?.agents.find((agent) => /present/i.test(agent.name))?.agent_id
+    ?? config?.agents[0]?.agent_id
+    ?? null;
+  const presentationAgent = config?.agents.find((agent) => agent.agent_id === presentationAgentId);
+  const optionGroups = tree.areas.map((area) => ({
+    area,
+    documents: area.modules.flatMap((module) => module.documents),
+  }));
+
+  return <ConversationProvider {...providerConfig}>
+    <main className="embedded-presentation">
+      <header className="embedded-header"><div><span className="embedded-brand-mark">CP</span><div><strong>CP AGENT</strong><small>Presentazione assistita</small></div></div><button className="icon-button" title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button></header>
+      {error && <div className="error-banner"><span>{error}</span><button type="button" onClick={() => setError(null)}>Chiudi</button></div>}
+      <section className="embedded-source-step">
+        <div className="embedded-step-heading"><span>1</span><div><strong>Scegli la fonte</strong><small>Seleziona il contenuto da presentare.</small></div></div>
+        <select aria-label="Fonte della presentazione" disabled={isActive} value={selectedSource === undefined ? "" : selectedSource ?? "__all__"} onChange={(event) => setSelectedSource(event.target.value === "" ? undefined : event.target.value === "__all__" ? null : event.target.value)}>
+          <option value="">Seleziona una fonte...</option>
+          <option value="__all__">Tutte le fonti</option>
+          {optionGroups.map(({ area }) => <optgroup key={area.id} label={`Area: ${area.name}`}>
+            {area.modules.length > 0 && <option disabled={area.modules.every((module) => module.documents.length === 0)} value={`area:${area.id}`}>Intera area - {area.name}</option>}
+            {area.modules.flatMap((module) => [
+              <option disabled={module.documents.length === 0} key={`module:${module.id}`} value={`module:${module.id}`}>Modulo - {module.name}</option>,
+              ...module.documents.map((document) => <option key={`document:${document.id}`} value={`document:${document.id}`}>Documento - {document.source}</option>),
+            ])}
+          </optgroup>)}
+          {tree.unassigned_documents.length > 0 && <optgroup label="Documenti non organizzati">{tree.unassigned_documents.map((document) => <option key={`document:${document.id}`} value={`document:${document.id}`}>{document.source}</option>)}</optgroup>}
+          {tree.areas.length === 0 && tree.unassigned_documents.length === 0 && sources.map((source) => <option key={source.source} value={source.source}>{source.source}</option>)}
+        </select>
+      </section>
+      {selectedSource !== undefined && config ? <section className="embedded-active-step">
+        <div className="embedded-step-heading"><span>2</span><div><strong>{isActive ? "Presentazione in corso" : "Avvia la presentazione"}</strong><small>{selectedLabel}</small></div></div>
+        <VoicePanel
+          agentId={presentationAgentId}
+          agentName={presentationAgent?.name}
+          contextMode="presentazione"
+          elevenLabsConfig={config}
+          embedded
+          onActiveChange={setIsActive}
+          onSetError={setError}
+          onVoiceContextChange={() => undefined}
+          retrievalQuery={null}
+          selectedVectorSource={selectedSource}
+          startButtonLabel="Avvia presentazione"
+          startPrompt={buildPresentationStartPrompt(selectedSource)}
+          title="Presentazione vocale"
+        />
+      </section> : !config ? <div className="embedded-loading"><Loader2 className="spin" size={22} />Caricamento</div> : null}
+    </main>
+  </ConversationProvider>;
+}
+
 function PresentationPage({
   agentId,
   elevenLabsConfig,
@@ -3663,7 +3795,9 @@ function VoicePanel({
   agentName,
   contextMode = "centralino-entrata",
   elevenLabsConfig,
+  embedded = false,
   onBeforeStart,
+  onActiveChange,
   onSetError,
   onVoiceContextChange,
   retrievalQuery,
@@ -3676,7 +3810,9 @@ function VoicePanel({
   agentName?: string | null;
   contextMode?: VoiceContext;
   elevenLabsConfig: ElevenLabsConfig;
+  embedded?: boolean;
   onBeforeStart?: () => void;
+  onActiveChange?: (active: boolean) => void;
   onSetError: (value: string | null) => void;
   onVoiceContextChange: (value: VoiceContext | null) => void;
   retrievalQuery: RetrievalQuery | null;
@@ -3709,6 +3845,10 @@ function VoicePanel({
   const effectiveAgentId = agentId || null;
   const effectiveAgentName = agentName || "non configurato";
   const isAgentConfigured = Boolean(elevenLabsConfig.configured && effectiveAgentId);
+
+  useEffect(() => {
+    onActiveChange?.(isConnected);
+  }, [isConnected, onActiveChange]);
 
   const finishTrackedSession = useCallback((sessionStatus: "completed" | "failed" | "cancelled" = "completed") => {
     const eventId = usageEventIdRef.current;
@@ -3878,7 +4018,7 @@ function VoicePanel({
   };
 
   return (
-    <section className="workspace-panel voice-panel">
+    <section className={`workspace-panel voice-panel${embedded ? " embedded-voice-panel" : ""}`}>
       <div className="panel-heading">
         <div>
           <p className="eyebrow">Voce realtime</p>
@@ -3925,6 +4065,8 @@ function VoicePanel({
         </button>
       </div>
 
+      {contextMode === "presentazione" && !isConnected && <MicrophonePermissionControl onSetError={onSetError} />}
+
       {isConnected ? (
         <button className="action-button danger" type="button" onClick={handleEnd}>
           <Square size={18} />
@@ -3955,6 +4097,77 @@ function VoicePanel({
       </form>
     </section>
   );
+}
+
+type MicrophonePermissionState = "checking" | "prompt" | "granted" | "denied" | "unsupported";
+
+function MicrophonePermissionControl({ onSetError }: { onSetError: (value: string | null) => void }) {
+  const [permission, setPermission] = useState<MicrophonePermissionState>("checking");
+
+  useEffect(() => {
+    let active = true;
+    let status: PermissionStatus | null = null;
+    const updatePermission = () => {
+      if (active && status) setPermission(status.state as "prompt" | "granted" | "denied");
+    };
+
+    if (!navigator.permissions?.query) {
+      setPermission("unsupported");
+      return () => { active = false; };
+    }
+
+    navigator.permissions.query({ name: "microphone" as PermissionName })
+      .then((nextStatus) => {
+        if (!active) return;
+        status = nextStatus;
+        updatePermission();
+        status.addEventListener("change", updatePermission);
+      })
+      .catch(() => active && setPermission("unsupported"));
+
+    return () => {
+      active = false;
+      status?.removeEventListener("change", updatePermission);
+    };
+  }, []);
+
+  const requestMicrophone = async () => {
+    setPermission("checking");
+    onSetError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      setPermission("granted");
+    } catch (requestError) {
+      const errorName = requestError instanceof DOMException ? requestError.name : "";
+      const denied = errorName === "NotAllowedError" || errorName === "SecurityError";
+      setPermission(denied ? "denied" : "unsupported");
+      onSetError(
+        denied
+          ? "Microfono non autorizzato. Premi l'icona del lucchetto nella barra degli indirizzi, imposta Microfono su Consenti e riprova."
+          : "Impossibile usare il microfono. Verifica che sia collegato e non sia occupato da un'altra applicazione.",
+      );
+    }
+  };
+
+  const labels: Record<MicrophonePermissionState, string> = {
+    checking: "Verifica microfono...",
+    prompt: "Abilita microfono",
+    granted: "Microfono abilitato",
+    denied: "Riprova microfono",
+    unsupported: "Verifica microfono",
+  };
+
+  return <div className={`microphone-permission microphone-permission-${permission}`}>
+    <div>
+      {permission === "granted" ? <Mic size={18} /> : <MicOff size={18} />}
+      <span>{permission === "granted" ? "Microfono pronto" : permission === "denied" ? "Il browser sta bloccando il microfono" : "Autorizza il microfono prima di iniziare"}</span>
+    </div>
+    <button className="secondary-button" disabled={permission === "checking"} type="button" onClick={() => void requestMicrophone()}>
+      {permission === "checking" ? <Loader2 className="spin" size={16} /> : permission === "granted" ? <Check size={16} /> : <Mic size={16} />}
+      {labels[permission]}
+    </button>
+  </div>;
 }
 
 function StatusPill() {
@@ -4112,11 +4325,20 @@ function RootApp() {
     return () => window.removeEventListener("jk-auth-expired", clearSession);
   }, []);
 
+  useEffect(() => {
+    if (isEmbeddedPresentation && !isCheckingSession && !currentUser) {
+      postEmbeddedPresentationState("idle");
+    }
+  }, [currentUser, isCheckingSession]);
+
   if (isCheckingSession) {
     return <main className="login-page"><Loader2 className="spin" size={28} /></main>;
   }
   if (!currentUser) {
-    return <LoginScreen onAuthenticated={setCurrentUser} />;
+    return <div className={isEmbeddedPresentation ? "embedded-login-shell" : undefined}><LoginScreen onAuthenticated={setCurrentUser} /></div>;
+  }
+  if (isEmbeddedPresentation) {
+    return <EmbeddedPresentationApp currentUser={currentUser} onLogout={async () => { await logout(); setCurrentUser(null); }} />;
   }
   return <App currentUser={currentUser} onLogout={async () => { await logout(); setCurrentUser(null); }} />;
 }

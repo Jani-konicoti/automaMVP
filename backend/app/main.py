@@ -44,6 +44,9 @@ SESSION_COOKIE = "cp_agent_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 PASSWORD_ITERATIONS = 310_000
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "lax").lower()
+if COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+    COOKIE_SAMESITE = "lax"
 INITIAL_ADMIN_PASSWORD = os.getenv("INITIAL_ADMIN_PASSWORD", "Cambiami24!")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 OUTBOUND_RECONCILE_CHECKS: dict[int, float] = {}
@@ -1996,6 +1999,11 @@ def resolve_tool_source(
                 "SELECT source FROM outbound_calls WHERE conversation_id = ? AND tenant_id = ?",
                 (conversation_id, tenant_id()),
             ).fetchone()
+            if not row or not row[0]:
+                row = conn.execute(
+                    "SELECT source FROM usage_events WHERE conversation_id = ? AND tenant_id = ?",
+                    (conversation_id, tenant_id()),
+                ).fetchone()
         if row and row[0]:
             return row[0]
 
@@ -2093,7 +2101,7 @@ def login(payload: LoginIn, response: Response) -> AuthUser:
         max_age=SESSION_TTL_SECONDS,
         httponly=True,
         secure=COOKIE_SECURE,
-        samesite="lax",
+        samesite=COOKIE_SAMESITE,
         path="/",
     )
     return row_to_auth_user(row)

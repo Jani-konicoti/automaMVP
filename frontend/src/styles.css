@@ -2527,6 +2527,239 @@ select:focus,
   display: block;
 }
 
+.embedded-login-shell {
+  background: #f5f7f8;
+  min-height: 100vh;
+}
+
+.embedded-login-shell .login-page {
+  display: flex;
+  justify-content: center;
+  padding: 24px;
+  width: 100%;
+}
+
+.embedded-login-shell .login-visual {
+  display: none;
+}
+
+.embedded-login-shell .login-panel {
+  align-self: center;
+  max-width: 430px;
+  width: 100%;
+}
+
+.embedded-presentation {
+  align-content: start;
+  background: #f5f7f8;
+  display: grid;
+  gap: 14px;
+  min-height: 100vh;
+  padding: 18px;
+}
+
+.embedded-header {
+  align-items: center;
+  border-bottom: 1px solid #dce3e8;
+  display: flex;
+  justify-content: space-between;
+  padding: 0 2px 14px;
+}
+
+.embedded-header > div {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.embedded-header > div > div {
+  display: grid;
+  gap: 1px;
+}
+
+.embedded-header strong {
+  color: #172033;
+  font-size: 0.94rem;
+  font-weight: 900;
+}
+
+.embedded-header small {
+  color: #6e7885;
+  font-size: 0.7rem;
+}
+
+.embedded-brand-mark {
+  align-items: center;
+  background: #d61f2a;
+  border-radius: 6px;
+  color: #fff;
+  display: inline-flex;
+  font-size: 0.72rem;
+  font-weight: 900;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.embedded-source-step,
+.embedded-active-step {
+  align-content: start;
+  display: grid;
+  gap: 13px;
+}
+
+.embedded-source-step select {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  color: #20242b;
+  height: 46px;
+  padding: 0 12px;
+  width: 100%;
+}
+
+.embedded-step-heading {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.embedded-step-heading > span {
+  align-items: center;
+  background: #172033;
+  border-radius: 50%;
+  color: #fff;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 900;
+  height: 26px;
+  justify-content: center;
+  width: 26px;
+}
+
+.embedded-step-heading > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.embedded-step-heading strong {
+  color: #1e293b;
+  font-size: 0.86rem;
+}
+
+.embedded-step-heading small {
+  color: #6e7885;
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.embedded-voice-panel {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  gap: 12px;
+  min-height: 0;
+  padding: 0;
+}
+
+.embedded-voice-panel .panel-heading,
+.embedded-voice-panel .transport-toggle,
+.embedded-voice-panel .text-test,
+.embedded-voice-panel .voice-stats.compact {
+  display: none;
+}
+
+.embedded-voice-panel .orb {
+  height: 112px;
+  margin: 2px auto;
+  width: 112px;
+}
+
+.embedded-voice-panel .voice-stats {
+  display: none;
+}
+
+.embedded-voice-panel .action-button {
+  justify-content: center;
+  width: 100%;
+}
+
+.microphone-permission {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #d7dee3;
+  border-radius: 7px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 11px 12px;
+}
+
+.microphone-permission > div,
+.microphone-permission > button {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.microphone-permission > div {
+  color: #55616d;
+  font-size: 0.78rem;
+}
+
+.microphone-permission-granted {
+  background: #f0f8f3;
+  border-color: #bcdcc7;
+}
+
+.microphone-permission-granted > div {
+  color: #28633d;
+}
+
+.microphone-permission-denied {
+  background: #fff6f4;
+  border-color: #edc2ba;
+}
+
+.microphone-permission-denied > div {
+  color: #9b3329;
+}
+
+.embedded-voice-panel .microphone-permission {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.embedded-voice-panel .microphone-permission > button {
+  justify-content: center;
+  width: 100%;
+}
+
+.embedded-loading,
+.embedded-message {
+  align-items: center;
+  color: #65717d;
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  min-height: 180px;
+}
+
+.embedded-message {
+  align-self: center;
+  flex-direction: column;
+  text-align: center;
+}
+
+.embedded-message h1,
+.embedded-message p {
+  margin: 0;
+}
+
 .login-logo {
   display: block;
   height: auto;

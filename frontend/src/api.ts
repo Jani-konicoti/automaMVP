@@ -295,7 +295,8 @@ export type UserUpdateInput = Omit<UserCreateInput, "password"> & {
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const selectedTenant = localStorage.getItem("cp-agent-tenant-id");
+  const embeddedPresentation = window.location.pathname.replace(/\/$/, "") === "/presentazione-cpeople";
+  const selectedTenant = embeddedPresentation ? "1" : localStorage.getItem("cp-agent-tenant-id");
   const response = await fetch(`${API_BASE_URL}${path}`, {
     credentials: "include",
     headers: {
