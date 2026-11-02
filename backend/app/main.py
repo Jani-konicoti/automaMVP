@@ -2025,9 +2025,6 @@ def resolve_tool_source(
                 ).fetchone()
         if row and row[0]:
             return row[0]
-        # Never inherit a tenant-wide source while a scoped web conversation
-        # is waiting to be registered.
-        return None
 
     if not agent_id:
         return None
@@ -3412,6 +3409,11 @@ async def initiate_outbound_call(
         "agent_id": agent_id,
         "agent_phone_number_id": payload.agent_phone_number_id.strip(),
         "to_number": phone,
+        "conversation_initiation_client_data": {
+            "dynamic_variables": {
+                "knowledge_source": source or "",
+            },
+        },
     }
     url = "https://api.elevenlabs.io/v1/convai/twilio/outbound-call"
     headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
