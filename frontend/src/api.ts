@@ -235,6 +235,7 @@ export type Tenant = {
 
 export type UsageEvent = {
   id: number;
+  operator_username?: string | null;
   channel: "inbound" | "outbound" | "presentation";
   origin: "web" | "phone";
   conversation_id?: string | null;

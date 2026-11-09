@@ -333,6 +333,7 @@ class UsageSessionFinishIn(BaseModel):
 
 class UsageEvent(BaseModel):
     id: int
+    operator_username: str | None
     channel: str
     origin: str
     conversation_id: str | None
@@ -691,6 +692,7 @@ def ensure_storage() -> None:
                 agent_id TEXT NOT NULL,
                 agent_phone_number_id TEXT,
                 source TEXT,
+                operator_username TEXT,
                 conversation_id TEXT UNIQUE,
                 call_sid TEXT,
                 status TEXT NOT NULL,
@@ -721,6 +723,7 @@ def ensure_storage() -> None:
                 agent_id TEXT NOT NULL,
                 agent_phone_number_id TEXT NOT NULL,
                 source TEXT,
+                operator_username TEXT,
                 created_at TEXT NOT NULL,
                 started_at TEXT,
                 completed_at TEXT,
@@ -756,6 +759,13 @@ def ensure_storage() -> None:
         for column_name in ("campaign_id", "campaign_item_id"):
             if column_name not in call_columns:
                 conn.execute(f"ALTER TABLE outbound_calls ADD COLUMN {column_name} INTEGER")
+        if "operator_username" not in call_columns:
+            conn.execute("ALTER TABLE outbound_calls ADD COLUMN operator_username TEXT")
+        campaign_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(outbound_campaigns)").fetchall()
+        }
+        if "operator_username" not in campaign_columns:
+            conn.execute("ALTER TABLE outbound_campaigns ADD COLUMN operator_username TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_outbound_campaign_items_campaign
@@ -865,6 +875,7 @@ def ensure_storage() -> None:
                 conversation_id TEXT,
                 agent_id TEXT,
                 source TEXT,
+                operator_username TEXT,
                 status TEXT NOT NULL DEFAULT 'started',
                 duration_seconds INTEGER NOT NULL DEFAULT 0,
                 started_at TEXT NOT NULL,
@@ -879,6 +890,8 @@ def ensure_storage() -> None:
         usage_columns = {row[1] for row in conn.execute("PRAGMA table_info(usage_events)").fetchall()}
         if "reference_key" not in usage_columns:
             conn.execute("ALTER TABLE usage_events ADD COLUMN reference_key TEXT")
+        if "operator_username" not in usage_columns:
+            conn.execute("ALTER TABLE usage_events ADD COLUMN operator_username TEXT")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_events_reference ON usage_events (tenant_id, reference_key) WHERE reference_key IS NOT NULL"
         )
@@ -1451,6 +1464,7 @@ def row_to_outbound_call(row: sqlite3.Row) -> OutboundCall:
 def row_to_usage_event(row: sqlite3.Row) -> UsageEvent:
     return UsageEvent(
         id=row["id"],
+        operator_username=row["operator_username"],
         channel=row["channel"],
         origin=row["origin"],
         conversation_id=row["conversation_id"],
@@ -1513,6 +1527,7 @@ def upsert_usage_event(
     conversation_id: str | None,
     agent_id: str | None,
     source: str | None,
+    operator_username: str | None,
     status: str,
     started_at: str,
     completed_at: str | None = None,
@@ -1531,12 +1546,15 @@ def upsert_usage_event(
             """
             UPDATE usage_events
             SET channel = ?, origin = ?, agent_id = COALESCE(?, agent_id),
-                source = COALESCE(?, source), status = ?, duration_seconds = ?,
+                source = COALESCE(?, source),
+                operator_username = COALESCE(?, operator_username),
+                status = ?, duration_seconds = ?,
                 completed_at = ?, metadata_json = COALESCE(?, metadata_json), updated_at = ?
             WHERE id = ? AND tenant_id = ?
             """,
             (
-                channel, existing["origin"], agent_id, source, status, duration_seconds,
+                channel, existing["origin"], agent_id, source, operator_username,
+                status, duration_seconds,
                 completed_at, json.dumps(metadata, ensure_ascii=False) if metadata else None,
                 now, existing["id"], tenant_id(),
             ),
@@ -1545,13 +1563,13 @@ def upsert_usage_event(
     cursor = conn.execute(
         """
         INSERT INTO usage_events (
-            tenant_id, channel, origin, conversation_id, agent_id, source,
+            tenant_id, channel, origin, conversation_id, agent_id, source, operator_username,
             status, duration_seconds, started_at, completed_at, metadata_json,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            tenant_id(), channel, origin, conversation_id, agent_id, source,
+            tenant_id(), channel, origin, conversation_id, agent_id, source, operator_username,
             status, duration_seconds, started_at, completed_at,
             json.dumps(metadata, ensure_ascii=False) if metadata else None, now, now,
         ),
@@ -2184,6 +2202,7 @@ def start_usage_session(payload: UsageSessionIn, request: Request) -> UsageEvent
             conversation_id=payload.conversation_id,
             agent_id=payload.agent_id,
             source=payload.source,
+            operator_username=user.username,
             status="started",
             started_at=now,
         )
@@ -3391,6 +3410,7 @@ async def initiate_outbound_call(
     payload: OutboundCallIn,
     campaign_id: int | None = None,
     campaign_item_id: int | None = None,
+    operator_username: str | None = None,
 ) -> OutboundCall:
     api_key, agent_id = get_elevenlabs_credentials(payload.agent_id)
     source = ensure_known_source(payload.source)
@@ -3427,10 +3447,10 @@ async def initiate_outbound_call(
                 """
                 INSERT INTO outbound_calls (
                     contact_id, reference, phone, agent_id, agent_phone_number_id,
-                    source, status, transcript_text, error, created_at, updated_at,
+                    source, operator_username, status, transcript_text, error, created_at, updated_at,
                     campaign_id, campaign_item_id
                     , tenant_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.contact_id,
@@ -3439,6 +3459,7 @@ async def initiate_outbound_call(
                     agent_id,
                     payload.agent_phone_number_id.strip(),
                     source,
+                    operator_username,
                     error,
                     now,
                     now,
@@ -3458,10 +3479,10 @@ async def initiate_outbound_call(
                 """
                 INSERT INTO outbound_calls (
                     contact_id, reference, phone, agent_id, agent_phone_number_id,
-                    source, status, transcript_text, error, created_at, updated_at,
+                    source, operator_username, status, transcript_text, error, created_at, updated_at,
                     campaign_id, campaign_item_id
                     , tenant_id
-                ) VALUES (?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', '', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.contact_id,
@@ -3470,6 +3491,7 @@ async def initiate_outbound_call(
                     agent_id,
                     payload.agent_phone_number_id.strip(),
                     source,
+                    operator_username,
                     str(error),
                     now,
                     now,
@@ -3487,10 +3509,10 @@ async def initiate_outbound_call(
             """
             INSERT INTO outbound_calls (
                 contact_id, reference, phone, agent_id, agent_phone_number_id,
-                source, conversation_id, call_sid, status, transcript_text,
+                source, operator_username, conversation_id, call_sid, status, transcript_text,
                 created_at, updated_at, campaign_id, campaign_item_id
                 , tenant_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'initiated', '', ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'initiated', '', ?, ?, ?, ?, ?)
             """,
             (
                 payload.contact_id,
@@ -3499,6 +3521,7 @@ async def initiate_outbound_call(
                 agent_id,
                 payload.agent_phone_number_id.strip(),
                 source,
+                operator_username,
                 data.get("conversation_id"),
                 data.get("callSid") or data.get("call_sid"),
                 now,
@@ -3517,8 +3540,8 @@ async def initiate_outbound_call(
 
 
 @app.post("/api/outbound-calls", response_model=OutboundCall)
-async def start_outbound_call(payload: OutboundCallIn) -> OutboundCall:
-    return await initiate_outbound_call(payload)
+async def start_outbound_call(payload: OutboundCallIn, request: Request) -> OutboundCall:
+    return await initiate_outbound_call(payload, operator_username=request_user(request).username)
 
 
 async def advance_outbound_campaign(campaign_id: int) -> None:
@@ -3590,6 +3613,7 @@ async def advance_outbound_campaign(campaign_id: int) -> None:
                 ),
                 campaign_id=campaign_id,
                 campaign_item_id=item["id"],
+                operator_username=campaign["operator_username"],
             )
         except HTTPException as exc:
             with sqlite3.connect(DB_PATH) as conn:
@@ -3717,8 +3741,9 @@ async def reconcile_outbound_campaign(campaign_id: int) -> None:
 
 
 @app.post("/api/outbound-campaigns", response_model=OutboundCampaign)
-async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampaign:
+async def create_outbound_campaign(payload: OutboundCampaignIn, request: Request) -> OutboundCampaign:
     ensure_storage()
+    user = request_user(request)
     if len(set(payload.contact_ids)) != len(payload.contact_ids):
         raise HTTPException(status_code=400, detail="La selezione contiene contatti duplicati")
     source = ensure_known_source(payload.source)
@@ -3744,16 +3769,17 @@ async def create_outbound_campaign(payload: OutboundCampaignIn) -> OutboundCampa
         cursor = conn.execute(
             """
             INSERT INTO outbound_campaigns (
-                status, total_count, agent_id, agent_phone_number_id, source,
+                status, total_count, agent_id, agent_phone_number_id, source, operator_username,
                 created_at, updated_at
                 , tenant_id
-            ) VALUES ('queued', ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES ('queued', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 len(payload.contact_ids),
                 payload.agent_id.strip(),
                 payload.agent_phone_number_id.strip(),
                 source,
+                user.username,
                 now,
                 now,
                 tenant_id(),
@@ -4266,7 +4292,8 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
         conn.row_factory = sqlite3.Row
         existing = conn.execute(
             """
-            SELECT id, campaign_id, campaign_item_id, completed_at, created_at, source
+            SELECT id, campaign_id, campaign_item_id, completed_at, created_at,
+                   source, operator_username
             FROM outbound_calls WHERE conversation_id = ?
             """,
             (conversation_id,),
@@ -4347,12 +4374,15 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
         if existing:
             usage_started_at = existing["created_at"]
             usage_source = existing["source"]
+            usage_operator_username = existing["operator_username"]
         elif isinstance(metadata_started, (int, float)):
             usage_started_at = datetime.utcfromtimestamp(metadata_started).isoformat(timespec="seconds") + "Z"
             usage_source = resolve_tool_source(conversation_id, agent_id, None)
+            usage_operator_username = None
         else:
             usage_started_at = now
             usage_source = resolve_tool_source(conversation_id, agent_id, None)
+            usage_operator_username = None
         upsert_usage_event(
             conn,
             channel=usage_channel,
@@ -4360,6 +4390,7 @@ async def receive_elevenlabs_post_call(request: Request) -> dict[str, str]:
             conversation_id=conversation_id,
             agent_id=agent_id,
             source=usage_source,
+            operator_username=usage_operator_username,
             status="failed" if status == "failed" else "completed",
             started_at=usage_started_at,
             completed_at=completed_at,

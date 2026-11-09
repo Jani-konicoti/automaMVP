@@ -3181,7 +3181,7 @@ select:focus,
 .usage-chart-stack i.presentation, .usage-legend i.presentation { background: #c55b58; }
 
 .usage-log-table { border: 1px solid #dce3db; border-radius: 7px; overflow-x: auto; }
-.usage-log-row { align-items: center; border-top: 1px solid #e5eae4; display: grid; gap: 12px; grid-template-columns: 130px minmax(150px, 1fr) 70px 90px 70px minmax(120px, 1fr); min-width: 780px; padding: 10px 12px; }
+.usage-log-row { align-items: center; border-top: 1px solid #e5eae4; display: grid; gap: 12px; grid-template-columns: 130px minmax(110px, 0.8fr) minmax(150px, 1fr) 70px 90px 70px minmax(120px, 1fr); min-width: 920px; padding: 10px 12px; }
 .usage-log-row.header { background: #f4f7f4; border-top: 0; color: #68746c; font-size: 0.66rem; font-weight: 800; text-transform: uppercase; }
 .usage-log-row:not(.header) { color: #4e5a53; font-size: 0.75rem; }
 .usage-log-row strong { color: #26322b; }
