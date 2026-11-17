@@ -1,4 +1,4 @@
-# CP AGENT
+# CP AGENTS
 
 Applicazione React + Python/FastAPI + ElevenLabs Conversational AI.
 

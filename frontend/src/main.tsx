@@ -1001,7 +1001,7 @@ function Shell({
         <div className="sidebar-brand">
           <img className="sidebar-brand-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
           <div>
-            <strong>CP AGENT</strong>
+            <strong>CP AGENTS</strong>
             <span>Centro Paghe</span>
           </div>
           <button
@@ -3355,7 +3355,7 @@ function EmbeddedPresentationApp({ currentUser, onLogout }: { currentUser: AuthU
   const presentationAgent = config?.agents.find((agent) => agent.agent_id === presentationAgentId);
   return <ConversationProvider {...providerConfig}>
     <main className="embedded-presentation">
-      <header className="embedded-header"><div><span className="embedded-brand-mark">CP</span><div><strong>CP AGENT</strong><small>Presentazione assistita</small></div></div><button className="icon-button" title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button></header>
+      <header className="embedded-header"><div><span className="embedded-brand-mark">CP</span><div><strong>CP AGENTS</strong><small>Presentazione assistita</small></div></div><button className="icon-button" title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button></header>
       {error && <div className="error-banner"><span>{error}</span><button type="button" onClick={() => setError(null)}>Chiudi</button></div>}
       <section className="embedded-source-step">
         <div className="embedded-step-heading"><span>1</span><div><strong>Scegli la fonte</strong><small>Seleziona il contenuto da presentare.</small></div></div>

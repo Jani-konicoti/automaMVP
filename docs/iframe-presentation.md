@@ -1,4 +1,4 @@
-# Presentazione CP AGENT in iframe
+# Presentazione CP AGENTS in iframe
 
 URL della vista dedicata:
 
@@ -15,11 +15,11 @@ La vista utilizza sempre il tenant principale (`tenant_id = 1`); le credenziali 
 <iframe
   src="https://demo.centropaghe.it/presentazione-cpeople?parentOrigin=https%3A%2F%2Fplugin.example.it"
   allow="microphone"
-  title="Presentazione CP AGENT"
+  title="Presentazione CP AGENTS"
 ></iframe>
 ```
 
-Nel server CP AGENT, `IFRAME_ANCESTORS` deve autorizzare l'origine del plugin:
+Nel server CP AGENTS, `IFRAME_ANCESTORS` deve autorizzare l'origine del plugin:
 
 ```dotenv
 IFRAME_ANCESTORS='self' https://plugin.example.it

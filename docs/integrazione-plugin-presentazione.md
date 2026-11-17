@@ -1,6 +1,6 @@
-# Integrazione CP AGENT nel plugin
+# Integrazione CP AGENTS nel plugin
 
-Questa guida descrive come integrare la modalità Presentazione di CP AGENT in un iframe visualizzato all'interno di un modale.
+Questa guida descrive come integrare la modalità Presentazione di CP AGENTS in un iframe visualizzato all'interno di un modale.
 
 ## 1. URL dell'iframe
 
@@ -20,14 +20,14 @@ const cpAgentUrl =
   `?parentOrigin=${encodeURIComponent(window.location.origin)}`;
 ```
 
-Non deve essere passato alcun tenant di CP AGENT nell'URL: questa modalità utilizza sempre il tenant principale.
+Non deve essere passato alcun tenant di CP AGENTS nell'URL: questa modalità utilizza sempre il tenant principale.
 
 ## 2. Creazione dell'iframe
 
 ```html
 <iframe
   id="cp-agent-presentation"
-  title="Presentazione CP AGENT"
+  title="Presentazione CP AGENTS"
   allow="microphone"
 ></iframe>
 ```
@@ -67,7 +67,7 @@ Su dispositivi piccoli il modale dovrebbe occupare quasi tutto lo schermo.
 
 ## 4. Eventi inviati dall'iframe
 
-CP AGENT comunica con la pagina contenitore tramite `window.postMessage`.
+CP AGENTS comunica con la pagina contenitore tramite `window.postMessage`.
 
 ```js
 const cpAgentOrigin = "https://demo.centropaghe.it";
@@ -143,7 +143,7 @@ idle -> logged-in -> pdf-selected -> active -> pdf-selected
 | `pdf-selected` | Fonte selezionata e sistema pronto per l'avvio |
 | `active` | Presentazione vocale in corso |
 
-Quando la conversazione termina, CP AGENT torna automaticamente a `pdf-selected` mantenendo la fonte selezionata. L'utente può quindi avviare una nuova presentazione senza ripetere la selezione.
+Quando la conversazione termina, CP AGENTS torna automaticamente a `pdf-selected` mantenendo la fonte selezionata. L'utente può quindi avviare una nuova presentazione senza ripetere la selezione.
 
 ## 7. Apertura e chiusura del modale
 
@@ -169,7 +169,7 @@ Nascondere l'iframe non interrompe necessariamente la conversazione. Distruggerl
 
 ## 8. Autorizzazione del microfono
 
-La schermata CP AGENT contiene il pulsante **Abilita microfono**, che richiede l'autorizzazione e verifica che l'audio sia disponibile.
+La schermata CP AGENTS contiene il pulsante **Abilita microfono**, che richiede l'autorizzazione e verifica che l'audio sia disponibile.
 
 Il programmatore del plugin deve assicurarsi che:
 
@@ -177,7 +177,7 @@ Il programmatore del plugin deve assicurarsi che:
 - la pagina del plugin sia servita in HTTPS;
 - nessuna intestazione `Permissions-Policy` del portale blocchi il microfono.
 
-Se il portale invia una propria intestazione `Permissions-Policy`, deve autorizzare CP AGENT:
+Se il portale invia una propria intestazione `Permissions-Policy`, deve autorizzare CP AGENTS:
 
 ```http
 Permissions-Policy: microphone=(self "https://demo.centropaghe.it")
@@ -185,13 +185,13 @@ Permissions-Policy: microphone=(self "https://demo.centropaghe.it")
 
 ## 9. Autenticazione e tenant
 
-Il login avviene direttamente dentro l'iframe. Le credenziali devono appartenere al tenant principale di CP AGENT oppure a un superadmin.
+Il login avviene direttamente dentro l'iframe. Le credenziali devono appartenere al tenant principale di CP AGENTS oppure a un superadmin.
 
-Il plugin non deve trasmettere token, password o identificativi del tenant. La sessione viene gestita direttamente da CP AGENT tramite cookie sicuro.
+Il plugin non deve trasmettere token, password o identificativi del tenant. La sessione viene gestita direttamente da CP AGENTS tramite cookie sicuro.
 
-## 10. Configurazione richiesta sul server CP AGENT
+## 10. Configurazione richiesta sul server CP AGENTS
 
-Il server CP AGENT deve autorizzare il dominio principale e tutti i sottodomini `centropaghe.it`:
+Il server CP AGENTS deve autorizzare il dominio principale e tutti i sottodomini `centropaghe.it`:
 
 ```dotenv
 IFRAME_ANCESTORS='self' https://centropaghe.it https://*.centropaghe.it
@@ -199,7 +199,7 @@ COOKIE_SAMESITE=none
 COOKIE_SECURE=true
 ```
 
-Questa configurazione viene gestita sul server CP AGENT e non nel plugin.
+Questa configurazione viene gestita sul server CP AGENTS e non nel plugin.
 
 ## Checklist finale
 

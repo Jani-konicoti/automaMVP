@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pypdf import PdfReader
@@ -49,6 +49,7 @@ if COOKIE_SAMESITE not in {"lax", "strict", "none"}:
     COOKIE_SAMESITE = "lax"
 INITIAL_ADMIN_PASSWORD = os.getenv("INITIAL_ADMIN_PASSWORD", "Cambiami24!")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+VECTOR_STORE_API_TOKEN = os.getenv("VECTOR_STORE_API_TOKEN", "").strip()
 OUTBOUND_RECONCILE_CHECKS: dict[int, float] = {}
 CURRENT_TENANT_ID: ContextVar[int] = ContextVar("current_tenant_id", default=1)
 DEV_ORIGINS = {
@@ -59,7 +60,7 @@ DEV_ORIGINS = {
     "http://127.0.0.1:5174",
 }
 
-app = FastAPI(title="CP AGENT")
+app = FastAPI(title="CP AGENTS")
 
 app.add_middleware(
     CORSMiddleware,
@@ -162,6 +163,18 @@ class VectorStorePdfResult(VectorStoreStats):
     source: str
     pages: int
     extracted_chars: int
+
+
+class VectorStoreImportResult(BaseModel):
+    status: str
+    tenant_id: int
+    tenant: str
+    area: str
+    module: str
+    source: str
+    pages: int
+    extracted_chars: int
+    indexed_chunks: int
 
 
 class VectorStoreSource(BaseModel):
@@ -566,7 +579,7 @@ def ensure_storage() -> None:
                 "Non dire mai l'ID dell'appuntamento."
             )
             documentation = (
-                "Siamo CP AGENT. Orari: lunedi-venerdi 09:00-18:00."
+                "Siamo CP AGENTS. Orari: lunedi-venerdi 09:00-18:00."
             )
 
         if not BEHAVIOR_PATH.exists():
@@ -1229,7 +1242,11 @@ def permission_denied(request: Request) -> JSONResponse:
 @app.middleware("http")
 async def authenticate_request(request: Request, call_next):
     path = request.url.path
-    if request.method == "OPTIONS" or path in {"/api/health", "/api/auth/login"}:
+    if request.method == "OPTIONS" or path.rstrip("/") in {
+        "/api/health",
+        "/api/auth/login",
+        "/api/create-vector-store",
+    }:
         return await call_next(request)
     if path.startswith("/api/tools/") or path.startswith("/api/webhooks/"):
         return await call_next(request)
@@ -2020,6 +2037,36 @@ def require_tool_secret(provided_secret: str | None) -> None:
                 CURRENT_TENANT_ID.set(configured_tenant_id)
                 return
     raise HTTPException(status_code=401, detail="Webhook tool non autorizzato")
+
+
+def require_vector_store_api_token(authorization: str | None) -> None:
+    if not VECTOR_STORE_API_TOKEN:
+        raise HTTPException(status_code=503, detail="API vector store non configurata")
+    scheme, _, provided_token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not provided_token or not hmac.compare_digest(
+        provided_token,
+        VECTOR_STORE_API_TOKEN,
+    ):
+        raise HTTPException(status_code=401, detail="Token non valido o mancante")
+
+
+def resolve_external_tenant(identifier: str) -> sqlite3.Row:
+    normalized = identifier.strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Tenant obbligatorio")
+    ensure_storage()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT id, name, slug FROM tenants
+            WHERE is_active = 1 AND (CAST(id AS TEXT) = ? OR slug = ? COLLATE NOCASE)
+            """,
+            (normalized, normalized),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Tenant attivo non trovato")
+    return row
 
 
 def resolve_tool_source(
@@ -3002,6 +3049,141 @@ async def upload_pdf_vector_store(
         pages=pages,
         extracted_chars=len(extracted_text),
     )
+
+
+@app.post("/api/create-vector-store", response_model=VectorStoreImportResult)
+async def create_vector_store_api(
+    file: UploadFile = File(...),
+    tenant: str = Form(..., min_length=1, max_length=120),
+    area: str = Form(..., min_length=1, max_length=120),
+    module: str = Form(..., min_length=1, max_length=120),
+    authorization: str | None = Header(default=None),
+) -> VectorStoreImportResult:
+    require_vector_store_api_token(authorization)
+    target_tenant = resolve_external_tenant(tenant)
+    source = Path((file.filename or "").replace("\\", "/")).name.strip()
+    if not source or source in {".", ".."} or not source.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Il file deve avere un nome PDF valido")
+    if file.content_type not in {"application/pdf", "application/octet-stream"}:
+        raise HTTPException(status_code=400, detail="Upload must be a PDF")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Il PDF e vuoto")
+    if len(contents) > 24 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="PDF is too large")
+    extracted_text, pages = extract_pdf_text(contents)
+
+    area_name = area.strip()
+    module_name = module.strip()
+    tenant_context = CURRENT_TENANT_ID.set(target_tenant["id"])
+    try:
+        now = utc_now()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            area_row = conn.execute(
+                "SELECT id FROM knowledge_areas WHERE tenant_id = ? AND name = ? COLLATE NOCASE",
+                (tenant_id(), area_name),
+            ).fetchone()
+            if area_row:
+                area_id = area_row["id"]
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO knowledge_areas (tenant_id, name, position, created_at, updated_at)
+                    VALUES (?, ?, COALESCE((SELECT MAX(position) + 1 FROM knowledge_areas WHERE tenant_id = ?), 0), ?, ?)
+                    """,
+                    (tenant_id(), area_name, tenant_id(), now, now),
+                )
+                area_id = int(cursor.lastrowid)
+
+            module_row = conn.execute(
+                """
+                SELECT id FROM knowledge_modules
+                WHERE tenant_id = ? AND area_id = ? AND name = ? COLLATE NOCASE
+                """,
+                (tenant_id(), area_id, module_name),
+            ).fetchone()
+            if module_row:
+                module_id = module_row["id"]
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO knowledge_modules (
+                        tenant_id, area_id, name, position, created_at, updated_at
+                    ) VALUES (
+                        ?, ?, ?,
+                        COALESCE((SELECT MAX(position) + 1 FROM knowledge_modules WHERE tenant_id = ? AND area_id = ?), 0),
+                        ?, ?
+                    )
+                    """,
+                    (tenant_id(), area_id, module_name, tenant_id(), area_id, now, now),
+                )
+                module_id = int(cursor.lastrowid)
+
+            existing = conn.execute(
+                """
+                SELECT d.id, d.module_id, m.area_id
+                FROM knowledge_documents d
+                LEFT JOIN knowledge_modules m ON m.id = d.module_id AND m.tenant_id = d.tenant_id
+                WHERE d.tenant_id = ? AND d.source = ?
+                """,
+                (tenant_id(), source),
+            ).fetchone()
+            if existing and (
+                existing["module_id"] != module_id or existing["area_id"] != area_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Un documento con lo stesso nome esiste gia in un'altra area o modulo",
+                )
+            conn.commit()
+
+        indexed_chunks = index_vector_chunks(source, extracted_text, replace_source=True)
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            document = conn.execute(
+                "SELECT id, module_id FROM knowledge_documents WHERE tenant_id = ? AND source = ?",
+                (tenant_id(), source),
+            ).fetchone()
+            if not document:
+                raise HTTPException(status_code=500, detail="Documento indicizzato ma non registrato")
+            if document["module_id"] != module_id:
+                next_position = conn.execute(
+                    """
+                    SELECT COALESCE(MAX(position) + 1, 0) FROM knowledge_documents
+                    WHERE tenant_id = ? AND module_id = ?
+                    """,
+                    (tenant_id(), module_id),
+                ).fetchone()[0]
+                conn.execute(
+                    """
+                    UPDATE knowledge_documents
+                    SET module_id = ?, position = ?, updated_at = ?
+                    WHERE id = ? AND tenant_id = ?
+                    """,
+                    (module_id, next_position, utc_now(), document["id"], tenant_id()),
+                )
+            else:
+                conn.execute(
+                    "UPDATE knowledge_documents SET updated_at = ? WHERE id = ? AND tenant_id = ?",
+                    (utc_now(), document["id"], tenant_id()),
+                )
+            conn.commit()
+
+        return VectorStoreImportResult(
+            status="updated" if existing else "created",
+            tenant_id=target_tenant["id"],
+            tenant=target_tenant["slug"],
+            area=area_name,
+            module=module_name,
+            source=source,
+            pages=pages,
+            extracted_chars=len(extracted_text),
+            indexed_chunks=indexed_chunks,
+        )
+    finally:
+        CURRENT_TENANT_ID.reset(tenant_context)
 
 
 @app.get("/api/vector-store/search", response_model=VectorSearchResponse)
