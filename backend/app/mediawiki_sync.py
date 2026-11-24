@@ -440,11 +440,24 @@ def finish_run(run_id: int, status: str, stats: dict[str, int], errors: list[str
         conn.commit()
 
 
-def apply_crawl(result: CrawlResult, settings: MediaWikiSettings, seen_at: str) -> dict[str, int]:
+def apply_crawl(
+    result: CrawlResult,
+    settings: MediaWikiSettings,
+    seen_at: str,
+    *,
+    show_progress: bool = False,
+) -> dict[str, int]:
     stats = {"seen": len(result.pages), "indexed": 0, "unchanged": 0, "empty": 0, "deleted": 0}
-    for crawled in result.pages.values():
+    total = len(result.pages)
+    for position, crawled in enumerate(result.pages.values(), start=1):
         action = upsert_page(crawled.page, crawled.paths, settings.area, seen_at)
         stats[action] = stats.get(action, 0) + 1
+        if show_progress and (position == 1 or position % 5 == 0 or position == total):
+            print(
+                f"Indicizzazione: {position}/{total} "
+                f"(nuove/aggiornate: {stats['indexed']}, invariate: {stats['unchanged']}, vuote: {stats['empty']})",
+                flush=True,
+            )
     if not result.errors and not result.truncated:
         stats["deleted"] = delete_unseen_pages(set(result.pages))
     return stats
@@ -497,9 +510,19 @@ def run_sync(settings: MediaWikiSettings, *, force_full: bool = False) -> dict[s
                     save_connector(settings, tenant_id, sync_at=checkpoint, full=False)
                     finish_run(run_id, "completed", stats, [])
                     return stats
-            result = crawl_wiki(client, settings.root_page)
+            print("Crawl Wiki avviato...", flush=True)
+            result = crawl_wiki(
+                client,
+                settings.root_page,
+                progress=lambda read, queued, missing: print(
+                    f"Crawl Wiki: {read} pagine lette, {queued} collegamenti in coda, "
+                    f"{missing} link mancanti ignorati",
+                    flush=True,
+                ),
+            )
 
-        stats = apply_crawl(result, settings, checkpoint)
+        print(f"Crawl completato: {len(result.pages)} pagine. Avvio indicizzazione...", flush=True)
+        stats = apply_crawl(result, settings, checkpoint, show_progress=True)
         errors = result.errors
         complete = not result.errors and not result.truncated
         if complete:

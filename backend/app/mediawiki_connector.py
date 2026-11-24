@@ -5,7 +5,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
@@ -381,7 +381,12 @@ class MediaWikiClient:
         return changes
 
 
-def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = None) -> CrawlResult:
+def crawl_wiki(
+    client: MediaWikiClient,
+    root_title: str,
+    limit: int | None = None,
+    progress: Callable[[int, int, int], None] | None = None,
+) -> CrawlResult:
     queue: deque[tuple[str, tuple[str, ...]]] = deque([(normalize_title(root_title), tuple())])
     pages: dict[int, CrawledPage] = {}
     title_to_page_id: dict[str, int] = {}
@@ -424,6 +429,8 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
         if page.page_id in expanded_ids:
             continue
         expanded_ids.add(page.page_id)
+        if progress and (len(pages) == 1 or len(pages) % 10 == 0):
+            progress(len(pages), len(queue), len(missing_titles))
         link_contexts = page.link_contexts or tuple((linked_title, None) for linked_title in page.links)
         for linked_title, section in link_contexts:
             linked_parent_path = path
@@ -438,4 +445,6 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
                 continue
             queue.append((linked_title, linked_parent_path))
 
+    if progress:
+        progress(len(pages), len(queue), len(missing_titles))
     return CrawlResult(pages=pages, errors=errors, truncated=truncated)

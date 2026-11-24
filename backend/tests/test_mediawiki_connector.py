@@ -183,6 +183,19 @@ class MediaWikiExtractionTests(unittest.TestCase):
         self.assertEqual(result.errors, [])
         self.assertEqual(client.calls.count("Help:Pagina rimossa"), 1)
 
+    def test_crawler_reports_progress(self) -> None:
+        root = make_page(1, "Help On Line", "Root documentazione")
+        updates: list[tuple[int, int, int]] = []
+
+        crawl_wiki(
+            FakeClient({"Help On Line": root}),
+            "Help_On_Line",
+            progress=lambda read, queued, missing: updates.append((read, queued, missing)),
+        )
+
+        self.assertTrue(updates)
+        self.assertEqual(updates[-1], (1, 0, 0))
+
 
 class MediaWikiStorageTests(unittest.TestCase):
     def setUp(self) -> None:
