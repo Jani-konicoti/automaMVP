@@ -11,6 +11,7 @@ from app.mediawiki_connector import (
     CrawlResult,
     CrawledPage,
     WikiPage,
+    WikiPageNotFoundError,
     crawl_wiki,
     extract_contextual_links,
     extract_document,
@@ -49,7 +50,10 @@ class FakeClient:
 
     def get_page(self, title: str) -> WikiPage:
         self.calls.append(title)
-        return self.pages[title]
+        try:
+            return self.pages[title]
+        except KeyError as exc:
+            raise WikiPageNotFoundError(f"Pagina MediaWiki non trovata: {title}") from exc
 
 
 class MediaWikiExtractionTests(unittest.TestCase):
@@ -164,6 +168,20 @@ class MediaWikiExtractionTests(unittest.TestCase):
             ("Help On Line", "Guide operative", "ELABORAZIONI", "Workflow"),
             result.pages[3].paths,
         )
+
+    def test_crawler_ignores_and_deduplicates_stale_internal_links(self) -> None:
+        root = make_page(
+            1,
+            "Help On Line",
+            "Root documentazione",
+            ("Help:Pagina rimossa", "Help:Pagina rimossa"),
+        )
+        client = FakeClient({"Help On Line": root})
+
+        result = crawl_wiki(client, "Help_On_Line")
+
+        self.assertEqual(result.errors, [])
+        self.assertEqual(client.calls.count("Help:Pagina rimossa"), 1)
 
 
 class MediaWikiStorageTests(unittest.TestCase):

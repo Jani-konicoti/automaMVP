@@ -7,7 +7,7 @@ import sqlite3
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app import main as core
@@ -28,7 +28,7 @@ class MediaWikiSettings:
 
 
 def utc_now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def load_settings() -> MediaWikiSettings:
@@ -148,7 +148,7 @@ def resolve_tenant(identifier: str) -> sqlite3.Row:
 
 
 def acquire_lock(tenant_id: int) -> None:
-    expiry = (datetime.utcnow() - timedelta(hours=2)).isoformat(timespec="seconds") + "Z"
+    expiry = (datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="seconds").replace("+00:00", "Z")
     with sqlite3.connect(core.DB_PATH) as conn:
         conn.execute("DELETE FROM mediawiki_sync_locks WHERE tenant_id = ? AND locked_at < ?", (tenant_id, expiry))
         try:
@@ -482,7 +482,7 @@ def run_sync(settings: MediaWikiSettings, *, force_full: bool = False) -> dict[s
         full_due = force_full or not state or not state["last_full_sync_at"]
         if state and state["last_full_sync_at"]:
             last_full = core.parse_utc(state["last_full_sync_at"])
-            full_due = full_due or not last_full or datetime.utcnow() - last_full >= timedelta(hours=settings.full_sync_hours)
+            full_due = full_due or not last_full or datetime.now(UTC).replace(tzinfo=None) - last_full >= timedelta(hours=settings.full_sync_hours)
 
         with MediaWikiClient(
             settings.base_url,

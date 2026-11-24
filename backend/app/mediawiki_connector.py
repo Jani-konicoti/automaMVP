@@ -81,6 +81,10 @@ class CrawlResult:
     truncated: bool = False
 
 
+class WikiPageNotFoundError(RuntimeError):
+    """A stale internal link whose target no longer exists."""
+
+
 def normalize_title(value: str) -> str:
     return " ".join(unquote(value).replace("_", " ").split())
 
@@ -310,7 +314,7 @@ class MediaWikiClient:
         )
         rows = info_data.get("query", {}).get("pages", [])
         if not rows or rows[0].get("missing"):
-            raise RuntimeError(f"Pagina MediaWiki non trovata: {title}")
+            raise WikiPageNotFoundError(f"Pagina MediaWiki non trovata: {title}")
         info = rows[0]
         page_id = int(info["pageid"])
         canonical_title = normalize_title(info["title"])
@@ -382,12 +386,15 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
     pages: dict[int, CrawledPage] = {}
     title_to_page_id: dict[str, int] = {}
     expanded_ids: set[int] = set()
+    missing_titles: set[str] = set()
     errors: list[str] = []
     truncated = False
 
     while queue:
         title, parent_path = queue.popleft()
         normalized_key = title.casefold()
+        if normalized_key in missing_titles:
+            continue
         known_id = title_to_page_id.get(normalized_key)
         if known_id is not None:
             page = pages[known_id]
@@ -400,6 +407,9 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
             break
         try:
             page = client.get_page(title)
+        except WikiPageNotFoundError:
+            missing_titles.add(normalized_key)
+            continue
         except Exception as exc:
             errors.append(f"{title}: {exc}")
             continue
