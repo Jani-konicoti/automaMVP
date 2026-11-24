@@ -295,6 +295,29 @@ export type UserUpdateInput = Omit<UserCreateInput, "password"> & {
   is_active: boolean;
 };
 
+export type CommercialAccessRequest = {
+  id: number;
+  username: string;
+  status: "pending" | "approved" | "rejected";
+  created_at: string;
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
+};
+
+export type CommercialAccessRequestCreated = {
+  id: number;
+  username: string;
+  status: "pending";
+  status_token: string;
+  created_at: string;
+};
+
+export type CommercialAccessRequestStatus = {
+  username: string;
+  status: "pending" | "approved" | "rejected";
+  reviewed_at?: string | null;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const embeddedPresentation = window.location.pathname.replace(/\/$/, "") === "/presentazione-cpeople";
   const selectedTenant = embeddedPresentation ? "1" : localStorage.getItem("cp-agent-tenant-id");
@@ -385,9 +408,11 @@ export function deleteElevenLabsAgent(id: number) {
   });
 }
 
-export async function uploadVectorStorePdf(file: File, mode: "append" | "replace") {
+export async function uploadVectorStorePdf(file: File, mode: "append" | "replace", destination?: string | null) {
   const formData = new FormData();
   formData.append("file", file);
+  if (destination?.startsWith("area:")) formData.append("area_id", destination.slice(5));
+  if (destination?.startsWith("module:")) formData.append("module_id", destination.slice(7));
 
   const response = await fetch(
     `${API_BASE_URL}/api/vector-store/pdf?mode=${encodeURIComponent(mode)}`,
@@ -461,6 +486,30 @@ export function searchVectorStore(query: string, limit = 4, source?: string | nu
   return request<{ results: VectorSearchResult[] }>(
     `/api/vector-store/search?${params.toString()}`,
   );
+}
+
+export function getVectorStoreOverview(source: string, limit = 24) {
+  const params = new URLSearchParams({ source, limit: String(limit) });
+  return request<{ results: VectorSearchResult[] }>(`/api/vector-store/overview?${params.toString()}`);
+}
+
+export function requestCommercialAccess(username: string, password: string) {
+  return request<CommercialAccessRequestCreated>("/api/commercial-access-requests", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function getCommercialAccessRequestStatus(token: string) {
+  return request<CommercialAccessRequestStatus>(`/api/commercial-access-requests/status/${encodeURIComponent(token)}`);
+}
+
+export function listCommercialAccessRequests() {
+  return request<CommercialAccessRequest[]>("/api/commercial-access-requests");
+}
+
+export function reviewCommercialAccessRequest(id: number, decision: "approve" | "reject") {
+  return request<CommercialAccessRequest>(`/api/commercial-access-requests/${id}/${decision}`, { method: "POST" });
 }
 
 type VoiceFlow = "centralino-entrata" | "centralino-uscita" | "presentazione";

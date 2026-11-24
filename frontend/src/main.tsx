@@ -70,6 +70,7 @@ import {
   VectorStoreStats,
   UsageEvent,
   UsageReport,
+  CommercialAccessRequest,
   UserCreateInput,
   UserUpdateInput,
   changePassword,
@@ -96,6 +97,7 @@ import {
   getVectorStoreSources,
   getKnowledgeTree,
   getVectorStoreStats,
+  getVectorStoreOverview,
   listAppointments,
   listElevenLabsPhoneNumbers,
   listOutboundCalls,
@@ -124,6 +126,10 @@ import {
   getUsageReport,
   startUsageSession,
   finishUsageSession,
+  getCommercialAccessRequestStatus,
+  listCommercialAccessRequests,
+  requestCommercialAccess,
+  reviewCommercialAccessRequest,
 } from "./api";
 import "./styles.css";
 
@@ -283,11 +289,14 @@ Presenta il prodotto in sezioni fluide e professionali, senza inventare informaz
 }
 
 function buildPresentationStartPrompt(selectedVectorSource: string | null) {
+  const unifiedScopeInstruction = selectedVectorSource?.startsWith("area:") || selectedVectorSource?.startsWith("module:")
+    ? "Hai gia ricevuto il documento unificato dell'area o del modulo: usalo per costruire una panoramica coerente di tutti i contenuti, senza scegliere un documento casuale. Usa searchKnowledge solo per approfondire dettagli specifici."
+    : "Prima recupera le informazioni principali con searchKnowledge.";
   return `
 Avvia una presentazione commerciale del prodotto usando la fonte PDF attiva: ${
     selectedVectorSource || "tutte le fonti"
   }.
-Prima recupera le informazioni principali con searchKnowledge. Poi presenta introduzione, problema risolto, funzionalita principali, benefici, casi d'uso e chiusura.
+${unifiedScopeInstruction} Poi presenta introduzione, problema risolto, funzionalita principali, benefici, casi d'uso e chiusura.
 `.trim();
 }
 
@@ -584,7 +593,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
   }, [inboundVectorSource, outboundVectorSource, presentationVectorSource, vectorSources, knowledgeTree]);
 
   const handleVectorPdfUpload = useCallback(
-    async (files: File[]) => {
+    async (files: File[], destination?: string | null) => {
       if (files.length === 0) {
         return;
       }
@@ -595,7 +604,7 @@ function App({ currentUser, onLogout }: { currentUser: AuthUser; onLogout: () =>
       try {
         const responses = [];
         for (const file of files) {
-          responses.push(await uploadVectorStorePdf(file, pdfMode));
+          responses.push(await uploadVectorStorePdf(file, pdfMode, destination));
         }
 
         const lastResponse = responses[responses.length - 1];
@@ -826,7 +835,7 @@ type ShellProps = {
   onRefreshPhoneNumbers: () => Promise<void>;
   onUpdateElevenLabsAgent: (id: number, input: ElevenLabsAgentInput) => Promise<void>;
   onUpdateOutboundContact: (id: number, input: OutboundContactInput) => Promise<void>;
-  onVectorPdfUpload: (files: File[]) => Promise<void>;
+  onVectorPdfUpload: (files: File[], destination?: string | null) => Promise<void>;
   onKnowledgeTreeChange: (tree: KnowledgeTree) => void;
   onInboundVectorSourceChange: (source: string | null) => void;
   onOutboundVectorSourceChange: (source: string | null) => void;
@@ -1001,7 +1010,7 @@ function Shell({
         <div className="sidebar-brand">
           <img className="sidebar-brand-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
           <div>
-            <strong>CP AGENTS</strong>
+            <strong>CP Agents</strong>
             <span>Centro Paghe</span>
           </div>
           <button
@@ -1374,6 +1383,7 @@ function TenantsPage({ currentUser, onSetError }: { currentUser: AuthUser; onSet
 
 function UsersPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetError: (value: string | null) => void }) {
   const [users, setUsers] = useState<AuthUser[]>([]);
+  const [accessRequests, setAccessRequests] = useState<CommercialAccessRequest[]>([]);
   const [editingUser, setEditingUser] = useState<AuthUser | null>(null);
   const [form, setForm] = useState<UserCreateInput>(emptyUserInput);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -1383,7 +1393,16 @@ function UsersPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetEr
   const [isBusy, setIsBusy] = useState(false);
 
   const refresh = useCallback(async () => setUsers(await listUsers()), []);
+  const refreshAccessRequests = useCallback(async () => {
+    if (currentUser.role === "superadmin") setAccessRequests(await listCommercialAccessRequests());
+  }, [currentUser.role]);
   useEffect(() => { void refresh().catch((err) => onSetError(err instanceof Error ? err.message : "Caricamento utenti fallito")); }, [onSetError, refresh]);
+  useEffect(() => {
+    void refreshAccessRequests().catch((err) => onSetError(err instanceof Error ? err.message : "Caricamento richieste fallito"));
+    if (currentUser.role !== "superadmin") return;
+    const interval = window.setInterval(() => void refreshAccessRequests(), 15000);
+    return () => window.clearInterval(interval);
+  }, [currentUser.role, onSetError, refreshAccessRequests]);
 
   const openCreate = () => {
     setEditingUser(null);
@@ -1459,8 +1478,28 @@ function UsersPage({ currentUser, onSetError }: { currentUser: AuthUser; onSetEr
       onSetError(err instanceof Error ? err.message : "Eliminazione utente fallita");
     } finally { setIsBusy(false); }
   };
+  const reviewAccess = async (requestId: number, decision: "approve" | "reject") => {
+    setIsBusy(true);
+    try {
+      await reviewCommercialAccessRequest(requestId, decision);
+      await Promise.all([refresh(), refreshAccessRequests()]);
+    } catch (err) {
+      onSetError(err instanceof Error ? err.message : "Aggiornamento richiesta fallito");
+    } finally { setIsBusy(false); }
+  };
 
   return <section className="users-workspace">
+    {currentUser.role === "superadmin" && <div className="workspace-panel access-requests-panel">
+      <div className="panel-heading"><div><p className="eyebrow">Commerciali</p><h2>Richieste credenziali</h2></div><span className="request-counter">{accessRequests.filter((item) => item.status === "pending").length} in attesa</span></div>
+      <div className="access-request-list">
+        {accessRequests.map((item) => <article className={`access-request-row ${item.status}`} key={item.id}>
+          <div><strong>{item.username}</strong><span>Richiesta del {new Date(item.created_at).toLocaleString("it-IT", { dateStyle: "short", timeStyle: "short" })}</span></div>
+          <span className="access-request-status">{item.status === "pending" ? "In attesa" : item.status === "approved" ? "Approvata" : "Rifiutata"}</span>
+          {item.status === "pending" ? <div className="access-request-actions"><button className="small-button" disabled={isBusy} type="button" onClick={() => void reviewAccess(item.id, "reject")}><X size={15} />Rifiuta</button><button className="small-button primary" disabled={isBusy} type="button" onClick={() => void reviewAccess(item.id, "approve")}><Check size={15} />Approva</button></div> : <small>{item.reviewed_by ? `Gestita da ${item.reviewed_by}` : "Gestita"}</small>}
+        </article>)}
+        {accessRequests.length === 0 && <p className="empty-state">Nessuna richiesta ricevuta.</p>}
+      </div>
+    </div>}
     <div className="workspace-panel users-panel">
       <div className="panel-heading"><div><p className="eyebrow">Accessi</p><h2>Utenti</h2></div><button className="small-button primary" type="button" onClick={openCreate}><UserPlus size={16} />Nuovo utente</button></div>
       <div className="users-list">
@@ -1557,7 +1596,7 @@ function CentralinoPage({
   onRefreshOutboundCalls?: () => Promise<void>;
   onRefreshOutboundContacts?: () => Promise<void>;
   onRefreshPhoneNumbers?: () => Promise<void>;
-  onVectorPdfUpload: (files: File[]) => Promise<void>;
+  onVectorPdfUpload: (files: File[], destination?: string | null) => Promise<void>;
   onVectorSourceChange: (source: string | null) => void;
   onVoiceContextChange: (value: VoiceContext | null) => void;
   onUpdateContact?: (id: number, input: OutboundContactInput) => Promise<void>;
@@ -1701,6 +1740,7 @@ function CentralinoPage({
               pdfMode={pdfMode}
               vectorStats={vectorStats}
               vectorStatus={vectorStatus}
+              tree={knowledgeTree}
             />
             <VectorSourceSelector
               allSourcesDescription="Il centralino cerca in tutti i PDF indicizzati."
@@ -1755,6 +1795,7 @@ function CentralinoPage({
           pdfMode={pdfMode}
           vectorStats={vectorStats}
           vectorStatus={vectorStatus}
+          tree={knowledgeTree}
         />
         <VectorSourceSelector
           allSourcesDescription="Il centralino cerca in tutti i PDF indicizzati."
@@ -2960,15 +3001,18 @@ function VectorPdfManager({
   pdfMode,
   vectorStats,
   vectorStatus,
+  tree,
 }: {
   isIndexingPdf: boolean;
   onPdfModeChange: (value: "append" | "replace") => void;
-  onVectorPdfUpload: (files: File[]) => Promise<void>;
+  onVectorPdfUpload: (files: File[], destination?: string | null) => Promise<void>;
   pdfMode: "append" | "replace";
   vectorStats: VectorStoreStats;
   vectorStatus: string | null;
+  tree: KnowledgeTree;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [destination, setDestination] = useState("");
 
   return (
     <>
@@ -2992,6 +3036,20 @@ function VectorPdfManager({
             Sostituisci
           </button>
         </div>
+        <label className="pdf-destination">
+          <span>Sposta in</span>
+          <select
+            disabled={isIndexingPdf}
+            value={destination}
+            onChange={(event) => setDestination(event.target.value)}
+          >
+            <option value="">Non organizzati</option>
+            {tree.areas.map((area) => <optgroup key={area.id} label={area.name}>
+              <option value={`area:${area.id}`}>{area.name} (area)</option>
+              {area.modules.map((module) => <option key={module.id} value={`module:${module.id}`}>{module.name}</option>)}
+            </optgroup>)}
+          </select>
+        </label>
         <input
           accept="application/pdf"
           className="hidden-file-input"
@@ -3003,7 +3061,7 @@ function VectorPdfManager({
             const files = Array.from(event.target.files ?? []);
             event.target.value = "";
             if (files.length > 0) {
-              void onVectorPdfUpload(files);
+              void onVectorPdfUpload(files, destination || null);
             }
           }}
         />
@@ -3055,10 +3113,34 @@ function VectorSourceSelector({
   const [editor, setEditor] = useState<{ kind: "area" | "module"; id?: number; parentId?: number; name: string } | null>(null);
   const [deleting, setDeleting] = useState<{ kind: "area" | "module"; id: number; name: string } | null>(null);
   const [dropTargetAreaId, setDropTargetAreaId] = useState<number | null>(null);
+  const [treeQuery, setTreeQuery] = useState("");
+  const [expandedAreas, setExpandedAreas] = useState<Set<number>>(() => new Set());
+  const [expandedModules, setExpandedModules] = useState<Set<number>>(() => new Set());
+  const [unassignedExpanded, setUnassignedExpanded] = useState(false);
   const draggedItem = useRef<{ kind: "areas" | "modules" | "documents"; id: number } | null>(null);
   const knowledgeTreeRef = useRef<HTMLDivElement>(null);
 
   const documentCount = (areaId: number) => tree.areas.find((area) => area.id === areaId)?.modules.reduce((sum, module) => sum + module.documents.length, 0) ?? 0;
+  const normalizedTreeQuery = treeQuery.trim().toLocaleLowerCase("it");
+  const visibleAreas = useMemo(() => tree.areas.map((area) => {
+    if (!normalizedTreeQuery || area.name.toLocaleLowerCase("it").includes(normalizedTreeQuery)) return area;
+    const modules = area.modules.map((module) => {
+      if (module.name.toLocaleLowerCase("it").includes(normalizedTreeQuery)) return module;
+      return {
+        ...module,
+        documents: module.documents.filter((document) => document.source.toLocaleLowerCase("it").includes(normalizedTreeQuery)),
+      };
+    }).filter((module) => module.documents.length > 0);
+    return { ...area, modules };
+  }).filter((area) => !normalizedTreeQuery || area.name.toLocaleLowerCase("it").includes(normalizedTreeQuery) || area.modules.length > 0), [normalizedTreeQuery, tree.areas]);
+  const visibleUnassignedDocuments = normalizedTreeQuery
+    ? tree.unassigned_documents.filter((document) => document.source.toLocaleLowerCase("it").includes(normalizedTreeQuery))
+    : tree.unassigned_documents;
+  const toggleExpanded = (setter: React.Dispatch<React.SetStateAction<Set<number>>>, id: number) => setter((current) => {
+    const next = new Set(current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const runTreeAction = async (action: () => Promise<KnowledgeTree>) => {
     setIsBusy(true);
     onSetError(null);
@@ -3115,6 +3197,7 @@ function VectorSourceSelector({
         <div><strong>Ambito della conoscenza</strong><span>{knowledgeScopeLabel(selectedSource, tree)}</span></div>
         {canManage && <button className={`small-button${isManaging ? " primary" : ""}`} type="button" onClick={() => setIsManaging((value) => !value)}><GripVertical size={15} />{isManaging ? "Fine" : "Organizza"}</button>}
       </div>
+      <label className="knowledge-tree-search"><Search size={16} /><input aria-label="Cerca nelle fonti" placeholder="Cerca area, modulo o documento..." value={treeQuery} onChange={(event) => setTreeQuery(event.target.value)} />{treeQuery && <button title="Cancella ricerca" type="button" onClick={() => setTreeQuery("")}><X size={14} /></button>}</label>
       <div className="vector-sources knowledge-tree" ref={knowledgeTreeRef} onDragOver={autoScrollTree}>
       {isManaging && tree.areas.length > 0 && <div className="knowledge-drop-shelf">
         <span>Trascina nell'area</span>
@@ -3140,7 +3223,10 @@ function VectorSourceSelector({
           <small>{allSourcesDescription}</small>
         </span>
       </label>
-      {tree.areas.map((area, areaIndex) => <section
+      {visibleAreas.map((area) => {
+        const areaIndex = tree.areas.findIndex((item) => item.id === area.id);
+        const areaExpanded = Boolean(normalizedTreeQuery) || expandedAreas.has(area.id);
+        return <section
         className={`knowledge-area${dropTargetAreaId === area.id ? " drop-target" : ""}`}
         draggable={isManaging}
         key={area.id}
@@ -3152,11 +3238,16 @@ function VectorSourceSelector({
       >
         <header>
           {isManaging && <GripVertical className="drag-handle" size={16} />}
+          <button className={`knowledge-expand${areaExpanded ? " expanded" : ""}`} title={areaExpanded ? "Chiudi area" : "Apri area"} type="button" onClick={() => toggleExpanded(setExpandedAreas, area.id)}><ChevronRight size={16} /></button>
           <label><input checked={selectedSource === `area:${area.id}`} disabled={documentCount(area.id) === 0} name={name} type="radio" onChange={() => onChange(`area:${area.id}`)} /><Folder size={17} /><strong>{area.name}</strong><span>{documentCount(area.id)} documenti</span></label>
           {isManaging && <div className="knowledge-actions"><button title="Nuovo modulo" type="button" onClick={() => setEditor({ kind: "module", parentId: area.id, name: "" })}><FolderPlus size={15} /></button><button title="Rinomina area" type="button" onClick={() => setEditor({ kind: "area", id: area.id, name: area.name })}><Pencil size={14} /></button><button title="Elimina area" type="button" onClick={() => setDeleting({ kind: "area", id: area.id, name: area.name })}><Trash2 size={14} /></button></div>}
         </header>
-        <div className="knowledge-modules">
-          {area.modules.map((module, moduleIndex) => <section
+        {areaExpanded && <div className="knowledge-modules">
+          {area.modules.map((module) => {
+            const originalModule = tree.areas.find((item) => item.id === area.id)?.modules.find((item) => item.id === module.id);
+            const moduleIndex = tree.areas.find((item) => item.id === area.id)?.modules.findIndex((item) => item.id === module.id) ?? 0;
+            const moduleExpanded = Boolean(normalizedTreeQuery) || expandedModules.has(module.id);
+            return <section
             className="knowledge-module"
             draggable={isManaging}
             key={module.id}
@@ -3164,13 +3255,14 @@ function VectorSourceSelector({
             onDragOver={(event) => { if (isManaging) event.preventDefault(); }}
             onDrop={(event) => { event.stopPropagation(); const dragged = draggedItem.current; if (dragged?.kind === "documents") void moveDragged("documents", module.id, module.documents.length); else void moveDragged("modules", area.id, moduleIndex); }}
           >
-            <header>{isManaging && <GripVertical className="drag-handle" size={15} />}<label><input checked={selectedSource === `module:${module.id}`} disabled={module.documents.length === 0} name={name} type="radio" onChange={() => onChange(`module:${module.id}`)} /><strong>{module.name}</strong><span>{module.documents.length}</span></label>{isManaging && <div className="knowledge-actions"><button title="Rinomina modulo" type="button" onClick={() => setEditor({ kind: "module", id: module.id, parentId: area.id, name: module.name })}><Pencil size={14} /></button><button title="Elimina modulo" type="button" onClick={() => setDeleting({ kind: "module", id: module.id, name: module.name })}><Trash2 size={14} /></button></div>}</header>
-            <div className="knowledge-documents">{module.documents.map((document, documentIndex) => <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={(event) => { event.stopPropagation(); draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", module.id, documentIndex); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>)}</div>
-          </section>)}
+            <header>{isManaging && <GripVertical className="drag-handle" size={15} />}<button className={`knowledge-expand${moduleExpanded ? " expanded" : ""}`} title={moduleExpanded ? "Chiudi modulo" : "Apri modulo"} type="button" onClick={() => toggleExpanded(setExpandedModules, module.id)}><ChevronRight size={15} /></button><label><input checked={selectedSource === `module:${module.id}`} disabled={(originalModule?.documents.length ?? 0) === 0} name={name} type="radio" onChange={() => onChange(`module:${module.id}`)} /><strong>{module.name}</strong><span>{originalModule?.documents.length ?? 0}</span></label>{isManaging && <div className="knowledge-actions"><button title="Rinomina modulo" type="button" onClick={() => setEditor({ kind: "module", id: module.id, parentId: area.id, name: module.name })}><Pencil size={14} /></button><button title="Elimina modulo" type="button" onClick={() => setDeleting({ kind: "module", id: module.id, name: module.name })}><Trash2 size={14} /></button></div>}</header>
+            {moduleExpanded && <div className="knowledge-documents">{module.documents.map((document) => { const documentIndex = originalModule?.documents.findIndex((item) => item.id === document.id) ?? 0; return <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={(event) => { event.stopPropagation(); draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", module.id, documentIndex); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>; })}</div>}
+          </section>; })}
           {area.modules.length === 0 && <p className="knowledge-empty">{isManaging ? "Trascina qui un documento oppure crea un modulo." : "Nessun modulo in quest'area."}</p>}
-        </div>
-      </section>)}
-      {tree.unassigned_documents.length > 0 && <section className="knowledge-unassigned" onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={() => void moveDragged("documents", null, tree.unassigned_documents.length)}><header><strong>Non organizzati</strong><span>{tree.unassigned_documents.length}</span></header>{tree.unassigned_documents.map((document, index) => <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={() => { draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", null, index); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>)}</section>}
+        </div>}
+      </section>; })}
+      {visibleUnassignedDocuments.length > 0 && <section className="knowledge-unassigned" onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={() => void moveDragged("documents", null, tree.unassigned_documents.length)}><header><button className={`knowledge-expand${unassignedExpanded || normalizedTreeQuery ? " expanded" : ""}`} title={unassignedExpanded ? "Chiudi documenti" : "Apri documenti"} type="button" onClick={() => setUnassignedExpanded((value) => !value)}><ChevronRight size={16} /></button><strong>Non organizzati</strong><span>{tree.unassigned_documents.length}</span></header>{(unassignedExpanded || Boolean(normalizedTreeQuery)) && visibleUnassignedDocuments.map((document) => { const index = tree.unassigned_documents.findIndex((item) => item.id === document.id); return <label className="knowledge-document" draggable={isManaging} key={document.id} onDragStart={() => { draggedItem.current = { kind: "documents", id: document.id }; }} onDragOver={(event) => { if (isManaging) event.preventDefault(); }} onDrop={(event) => { event.stopPropagation(); void moveDragged("documents", null, index); }}>{isManaging && <GripVertical className="drag-handle" size={14} />}<input checked={selectedSource === `document:${document.id}`} name={name} type="radio" onChange={() => onChange(`document:${document.id}`)} /><BookOpen size={15} /><span><strong>{document.source}</strong><small>{document.chunks} chunk</small></span></label>; })}</section>}
+      {normalizedTreeQuery && visibleAreas.length === 0 && visibleUnassignedDocuments.length === 0 && <p className="knowledge-empty standalone">Nessuna fonte trovata.</p>}
       {tree.areas.length === 0 && tree.unassigned_documents.length === 0 && sources.length === 0 && <p className="knowledge-empty standalone">Nessun documento indicizzato.</p>}
       </div>
       {isManaging && <button className="knowledge-add-area" disabled={isBusy} type="button" onClick={() => setEditor({ kind: "area", name: "" })}><Plus size={15} />Nuova area</button>}
@@ -3355,8 +3447,14 @@ function EmbeddedPresentationApp({ currentUser, onLogout }: { currentUser: AuthU
   const presentationAgent = config?.agents.find((agent) => agent.agent_id === presentationAgentId);
   return <ConversationProvider {...providerConfig}>
     <main className="embedded-presentation">
-      <header className="embedded-header"><div><span className="embedded-brand-mark">CP</span><div><strong>CP AGENTS</strong><small>Presentazione assistita</small></div></div><button className="icon-button" title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button></header>
+      <header className="embedded-header"><div><span className="embedded-brand-mark">CP</span><div><strong>CP Agents</strong><small>Presentazione assistita</small></div></div><button className="icon-button" title="Esci" type="button" onClick={() => void onLogout()}><LogOut size={17} /></button></header>
       {error && <div className="error-banner"><span>{error}</span><button type="button" onClick={() => setError(null)}>Chiudi</button></div>}
+      <section className="embedded-welcome">
+        <strong>Benvenuto in CP Agents!</strong>
+        <p>Per avviare la presentazione, assicurati di <b>attivare il microfono</b> e di trovarti in un ambiente silenzioso, evitando rumori di sottofondo.</p>
+        <p>Attendi qualche secondo: la presentazione inizierà automaticamente.</p>
+        <p><b>Potrai fare domande in qualsiasi momento</b>, interagendo direttamente con l'assistente.</p>
+      </section>
       <section className="embedded-source-step">
         <div className="embedded-step-heading"><span>1</span><div><strong>Scegli la fonte</strong><small>Seleziona il contenuto da presentare.</small></div></div>
         <EmbeddedSourcePicker disabled={isActive} onChange={setSelectedSource} selectedSource={selectedSource} sources={sources} tree={tree} />
@@ -3942,6 +4040,7 @@ function VoicePanel({
   const [inputVolume, setInputVolume] = useState(0);
   const [textMessage, setTextMessage] = useState("");
   const [connectionMode, setConnectionMode] = useState<"webrtc" | "websocket">("webrtc");
+  const [presentationOverview, setPresentationOverview] = useState("");
   const hasSentContextRef = useRef(false);
   const hasSentStartPromptRef = useRef(false);
   const lastContextUpdateRef = useRef("");
@@ -3986,12 +4085,15 @@ function VoicePanel({
       return;
     }
 
-    const contextUpdate =
+    const baseContextUpdate =
       contextMode === "presentazione"
         ? buildPresentationContextUpdate(selectedVectorSource)
         : connectionMode === "webrtc"
         ? buildRealtimeContextUpdate(selectedVectorSource)
         : buildContextUpdate(selectedVectorSource);
+    const contextUpdate = presentationOverview
+      ? `${baseContextUpdate}\n\nDOCUMENTO UNIFICATO DELL'AREA O DEL MODULO SELEZIONATO:\n${presentationOverview}`
+      : baseContextUpdate;
 
     if (!hasSentContextRef.current || lastContextUpdateRef.current !== contextUpdate) {
       if (connectionMode === "webrtc") {
@@ -4012,6 +4114,7 @@ function VoicePanel({
     connectionMode,
     contextMode,
     isConnected,
+    presentationOverview,
     selectedVectorSource,
     sendContextualUpdate,
   ]);
@@ -4077,6 +4180,16 @@ function VoicePanel({
       onBeforeStart?.();
       onVoiceContextChange(contextMode);
       onSetError(null);
+      if (contextMode === "presentazione" && (
+        selectedVectorSource?.startsWith("area:") || selectedVectorSource?.startsWith("module:")
+      )) {
+        const overview = await getVectorStoreOverview(selectedVectorSource!, 24);
+        setPresentationOverview(
+          overview.results.map((result) => `FONTE: ${result.source}\n${result.text}`).join("\n\n---\n\n"),
+        );
+      } else {
+        setPresentationOverview("");
+      }
       let conversationId: string | null = null;
       if (connectionMode === "webrtc") {
         const response = await getConversationToken(effectiveAgentId, contextMode);
@@ -4396,6 +4509,28 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) =>
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRequestingAccess, setIsRequestingAccess] = useState(false);
+  const [requestStatus, setRequestStatus] = useState<"pending" | "approved" | "rejected" | null>(null);
+  const accessRequestTokenKey = "cp-agents-commercial-access-token";
+
+  useEffect(() => {
+    if (!isEmbeddedPresentation) return;
+    const token = localStorage.getItem(accessRequestTokenKey);
+    if (!token) return;
+    const checkStatus = async () => {
+      try {
+        const response = await getCommercialAccessRequestStatus(token);
+        setRequestStatus(response.status);
+        if (response.status === "approved") setUsername(response.username);
+      } catch {
+        localStorage.removeItem(accessRequestTokenKey);
+        setRequestStatus(null);
+      }
+    };
+    void checkStatus();
+    const interval = window.setInterval(() => void checkStatus(), 8000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -4403,8 +4538,25 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) =>
     setIsSubmitting(true);
     try {
       onAuthenticated(await login(username, password));
+      localStorage.removeItem(accessRequestTokenKey);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Accesso non riuscito");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const submitAccessRequest = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      const response = await requestCommercialAccess(username, password);
+      localStorage.setItem(accessRequestTokenKey, response.status_token);
+      setRequestStatus("pending");
+      setIsRequestingAccess(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invio richiesta non riuscito");
     } finally {
       setIsSubmitting(false);
     }
@@ -4413,17 +4565,19 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: AuthUser) =>
   return <main className="login-page">
     <section className="login-visual">
       <img className="login-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
-      <h1><span>CP</span> AGENT</h1>
+      <h1><span>CP</span> Agents</h1>
       <p>La piattaforma vocale per gestire centralino, chiamate commerciali e presentazioni assistite.</p>
     </section>
     <section className="login-panel">
-      <div className="login-heading"><p className="eyebrow">Area riservata</p><h2>Accesso</h2><p>Inserisci le credenziali assegnate dall’amministratore.</p></div>
+      <div className="login-heading"><p className="eyebrow">Area riservata</p><h2>{isRequestingAccess ? "Richiedi credenziali" : "Accesso"}</h2><p>{isRequestingAccess ? "Scegli username e password. Il Super Admin dovra approvare la richiesta." : "Inserisci le credenziali assegnate dall'amministratore."}</p></div>
+      {requestStatus && !isRequestingAccess && <div className={`access-request-notice ${requestStatus}`}>{requestStatus === "pending" ? "Richiesta inviata. Riceverai qui l'esito dopo la verifica del Super Admin." : requestStatus === "approved" ? "Richiesta approvata. Inserisci la password scelta e accedi." : "La richiesta e stata rifiutata. Puoi inviarne una nuova."}</div>}
       {error && <div className="login-error">{error}</div>}
-      <form className="login-form" onSubmit={submit}>
+      <form className="login-form" onSubmit={isRequestingAccess ? submitAccessRequest : submit}>
         <label><span>Username</span><input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
-        <label><span>Password</span><input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-        <button className="primary-button" disabled={isSubmitting || !username.trim() || !password} type="submit">{isSubmitting ? <Loader2 className="spin" size={17} /> : <LogOut size={17} />}Accedi</button>
+        <label><span>{isRequestingAccess ? "Password desiderata" : "Password"}</span><input autoComplete={isRequestingAccess ? "new-password" : "current-password"} minLength={isRequestingAccess ? 8 : undefined} type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+        <button className="primary-button" disabled={isSubmitting || username.trim().length < (isRequestingAccess ? 3 : 1) || password.length < (isRequestingAccess ? 8 : 1)} type="submit">{isSubmitting ? <Loader2 className="spin" size={17} /> : isRequestingAccess ? <Send size={17} /> : <LogOut size={17} />}{isRequestingAccess ? "Invia richiesta" : "Accedi"}</button>
       </form>
+      {isEmbeddedPresentation && (isRequestingAccess || !requestStatus || requestStatus === "rejected") && <button className="login-access-request" type="button" onClick={() => { setIsRequestingAccess((value) => !value); setError(null); }}>{isRequestingAccess ? "Torna al login" : requestStatus === "rejected" ? "Invia una nuova richiesta" : "Non hai le credenziali? Richiedile"}</button>}
     </section>
   </main>;
 }

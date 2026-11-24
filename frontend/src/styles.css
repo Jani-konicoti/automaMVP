@@ -440,10 +440,50 @@ button:disabled {
   padding: 10px 12px;
 }
 
+.access-request-notice {
+  background: #eef5fb;
+  border: 1px solid #c9dced;
+  border-radius: 7px;
+  color: #315a78;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin-bottom: 15px;
+  padding: 11px 12px;
+}
+
+.access-request-notice.approved { background: #edf7f0; border-color: #c9e2d0; color: #276642; }
+.access-request-notice.rejected { background: #fff1ee; border-color: #e8b9b0; color: #8e352c; }
+
+.login-access-request {
+  background: transparent;
+  border: 0;
+  color: #315d79;
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 800;
+  margin: 15px auto 0;
+  padding: 6px;
+}
+
+.login-access-request:hover { color: #d61f2a; text-decoration: underline; }
+
 .users-workspace {
   margin: 0 auto;
   max-width: 1440px;
 }
+
+.access-requests-panel { margin-bottom: 16px; }
+.request-counter { background: #fff0f1; border-radius: 999px; color: #a51822; font-size: 0.72rem; font-weight: 900; padding: 5px 9px; }
+.access-request-list { border: 1px solid #e0e6e1; border-radius: 7px; overflow: hidden; }
+.access-request-row { align-items: center; border-top: 1px solid #e7ebe7; display: grid; gap: 14px; grid-template-columns: minmax(180px, 1fr) auto auto; min-height: 62px; padding: 10px 12px; }
+.access-request-row:first-child { border-top: 0; }
+.access-request-row > div:first-child { display: grid; gap: 3px; }
+.access-request-row > div:first-child span,
+.access-request-row > small { color: #738078; font-size: 0.72rem; }
+.access-request-status { background: #edf1ee; border-radius: 999px; color: #59665e; font-size: 0.68rem; font-weight: 900; padding: 4px 8px; }
+.access-request-row.approved .access-request-status { background: #e7f4eb; color: #286643; }
+.access-request-row.rejected .access-request-status { background: #fff0ee; color: #98382e; }
+.access-request-actions { display: flex; gap: 7px; }
 
 .users-list {
   display: grid;
@@ -1105,6 +1145,29 @@ textarea:focus {
   margin: 0 0 10px;
 }
 
+.pdf-destination {
+  display: grid;
+  flex: 1 1 210px;
+  gap: 4px;
+  min-width: 170px;
+}
+
+.pdf-destination span {
+  color: #667064;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.pdf-destination select {
+  background: #fff;
+  border: 1px solid #ccd6cb;
+  border-radius: 7px;
+  color: #26332c;
+  height: 38px;
+  min-width: 0;
+  padding: 0 30px 0 10px;
+}
+
 .pdf-mode-toggle {
   margin: 0;
   max-width: 220px;
@@ -1255,6 +1318,50 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.knowledge-tree-search {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #d7dfd9;
+  border-radius: 7px;
+  color: #738078;
+  display: flex;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 10px;
+}
+
+.knowledge-tree-search:focus-within {
+  border-color: #789d8c;
+  box-shadow: 0 0 0 3px rgba(31, 111, 91, 0.09);
+}
+
+.knowledge-tree-search input {
+  background: transparent;
+  border: 0;
+  color: #1d2922;
+  flex: 1 1 auto;
+  min-width: 0;
+  outline: 0;
+}
+
+.knowledge-tree-search button,
+.knowledge-expand {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: #66736b;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  width: 28px;
+}
+
+.knowledge-expand svg { transition: transform 150ms ease; }
+.knowledge-expand.expanded svg { transform: rotate(90deg); }
+.knowledge-expand:hover { background: #e8eeea; border-radius: 5px; color: #1f6f5b; }
+
 .knowledge-tree {
   border: 1px solid #dfe5dc;
   border-radius: 8px;
@@ -1337,6 +1444,8 @@ textarea:focus {
   padding: 8px 10px;
 }
 
+.knowledge-unassigned > header > strong { flex: 1 1 auto; }
+
 .knowledge-area header label,
 .knowledge-module header label {
   align-items: center;
@@ -1386,7 +1495,7 @@ textarea:focus {
 
 .knowledge-module > header {
   min-height: 40px;
-  padding: 7px 10px 7px 28px;
+  padding: 7px 10px 7px 18px;
 }
 
 .knowledge-documents {
@@ -2627,6 +2736,21 @@ select:focus,
   min-height: 100vh;
   padding: 18px;
 }
+
+.embedded-welcome {
+  background: #ffffff;
+  border: 1px solid #d9e1e7;
+  border-left: 3px solid #d61f2a;
+  border-radius: 7px;
+  color: #4c5865;
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+}
+
+.embedded-welcome > strong { color: #172033; font-size: 0.9rem; }
+.embedded-welcome p { font-size: 0.75rem; line-height: 1.45; margin: 0; }
+.embedded-welcome b { color: #283443; }
 
 .embedded-header {
   align-items: center;

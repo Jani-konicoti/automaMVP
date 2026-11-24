@@ -400,6 +400,34 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class CommercialAccessRequestIn(BaseModel):
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class CommercialAccessRequestCreated(BaseModel):
+    id: int
+    username: str
+    status: str
+    status_token: str
+    created_at: str
+
+
+class CommercialAccessRequestStatus(BaseModel):
+    username: str
+    status: str
+    reviewed_at: str | None = None
+
+
+class CommercialAccessRequest(BaseModel):
+    id: int
+    username: str
+    status: str
+    created_at: str
+    reviewed_at: str | None = None
+    reviewed_by: str | None = None
+
+
 class UserCreateIn(BaseModel):
     username: str = Field(min_length=3, max_length=80)
     password: str = Field(min_length=8, max_length=128)
@@ -816,6 +844,30 @@ def ensure_storage() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id
             ON user_sessions (user_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS commercial_access_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                status_token_hash TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'approved', 'rejected')),
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT,
+                reviewed_by INTEGER,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+                FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_commercial_access_requests_status
+            ON commercial_access_requests (tenant_id, status, created_at)
             """
         )
         now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -1247,6 +1299,12 @@ async def authenticate_request(request: Request, call_next):
         "/api/auth/login",
         "/api/create-vector-store",
     }:
+        return await call_next(request)
+    if (
+        request.method == "POST" and path.rstrip("/") == "/api/commercial-access-requests"
+    ) or (
+        request.method == "GET" and path.startswith("/api/commercial-access-requests/status/")
+    ):
         return await call_next(request)
     if path.startswith("/api/tools/") or path.startswith("/api/webhooks/"):
         return await call_next(request)
@@ -1853,6 +1911,35 @@ def search_vector_chunks(
     return diversified
 
 
+def scope_overview_chunks(scope: str, limit: int = 24) -> list[VectorSearchResult]:
+    sources = resolve_scope_sources(scope)
+    if not sources:
+        return []
+    placeholders = ",".join("?" for _ in sources)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT id, source, chunk_index, text
+            FROM vector_chunks
+            WHERE tenant_id = ? AND source IN ({placeholders}) AND chunk_index = 0
+            ORDER BY source COLLATE NOCASE
+            LIMIT ?
+            """,
+            [tenant_id(), *sources, limit],
+        ).fetchall()
+    return [
+        VectorSearchResult(
+            id=row["id"],
+            source=row["source"],
+            chunk_index=row["chunk_index"],
+            score=1.0,
+            text=row["text"],
+        )
+        for row in rows
+    ]
+
+
 def get_vector_store_stats() -> VectorStoreStats:
     ensure_storage()
     with sqlite3.connect(DB_PATH) as conn:
@@ -2366,6 +2453,191 @@ def usage_report(
         page_size=page_size,
         pages=pages,
     )
+
+
+def principal_tenant_id() -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT id FROM tenants WHERE slug = 'principale' COLLATE NOCASE AND is_active = 1"
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=503, detail="Tenant principale non disponibile")
+    return int(row[0])
+
+
+def commercial_request_from_row(row: sqlite3.Row) -> CommercialAccessRequest:
+    return CommercialAccessRequest(
+        id=row["id"],
+        username=row["username"],
+        status=row["status"],
+        created_at=row["created_at"],
+        reviewed_at=row["reviewed_at"],
+        reviewed_by=row["reviewed_by_username"],
+    )
+
+
+@app.post("/api/commercial-access-requests", response_model=CommercialAccessRequestCreated)
+def request_commercial_access(payload: CommercialAccessRequestIn) -> CommercialAccessRequestCreated:
+    ensure_storage()
+    username = normalize_username(payload.username)
+    target_tenant_id = principal_tenant_id()
+    status_token = secrets.token_urlsafe(32)
+    status_token_hash = hashlib.sha256(status_token.encode("utf-8")).hexdigest()
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        existing_user = conn.execute(
+            "SELECT 1 FROM users WHERE username = ? COLLATE NOCASE",
+            (username,),
+        ).fetchone()
+        if existing_user:
+            raise HTTPException(status_code=409, detail="Username gia in uso")
+        pending = conn.execute(
+            """
+            SELECT 1 FROM commercial_access_requests
+            WHERE username = ? COLLATE NOCASE AND tenant_id = ? AND status = 'pending'
+            """,
+            (username, target_tenant_id),
+        ).fetchone()
+        if pending:
+            raise HTTPException(status_code=409, detail="Esiste gia una richiesta in attesa per questo username")
+        cursor = conn.execute(
+            """
+            INSERT INTO commercial_access_requests (
+                tenant_id, username, password_hash, status_token_hash, status, created_at
+            ) VALUES (?, ?, ?, ?, 'pending', ?)
+            """,
+            (target_tenant_id, username, hash_password(payload.password), status_token_hash, now),
+        )
+        conn.commit()
+    return CommercialAccessRequestCreated(
+        id=int(cursor.lastrowid),
+        username=username,
+        status="pending",
+        status_token=status_token,
+        created_at=now,
+    )
+
+
+@app.get(
+    "/api/commercial-access-requests/status/{status_token}",
+    response_model=CommercialAccessRequestStatus,
+)
+def commercial_access_status(status_token: str) -> CommercialAccessRequestStatus:
+    ensure_storage()
+    token_hash = hashlib.sha256(status_token.encode("utf-8")).hexdigest()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT username, status, reviewed_at
+            FROM commercial_access_requests WHERE status_token_hash = ?
+            """,
+            (token_hash,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Richiesta non trovata")
+    return CommercialAccessRequestStatus(**dict(row))
+
+
+@app.get("/api/commercial-access-requests", response_model=list[CommercialAccessRequest])
+def list_commercial_access_requests(request: Request) -> list[CommercialAccessRequest]:
+    ensure_superadmin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT r.*, u.username AS reviewed_by_username
+            FROM commercial_access_requests r
+            LEFT JOIN users u ON u.id = r.reviewed_by
+            WHERE r.tenant_id = ?
+            ORDER BY CASE r.status WHEN 'pending' THEN 0 ELSE 1 END, r.created_at DESC
+            LIMIT 200
+            """,
+            (principal_tenant_id(),),
+        ).fetchall()
+    return [commercial_request_from_row(row) for row in rows]
+
+
+@app.post(
+    "/api/commercial-access-requests/{request_id}/approve",
+    response_model=CommercialAccessRequest,
+)
+def approve_commercial_access(request_id: int, request: Request) -> CommercialAccessRequest:
+    actor = request_user(request)
+    ensure_superadmin(actor)
+    target_tenant_id = principal_tenant_id()
+    now = utc_now()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            access_request = conn.execute(
+                """
+                SELECT * FROM commercial_access_requests
+                WHERE id = ? AND tenant_id = ? AND status = 'pending'
+                """,
+                (request_id, target_tenant_id),
+            ).fetchone()
+            if not access_request:
+                raise HTTPException(status_code=404, detail="Richiesta pendente non trovata")
+            conn.execute(
+                """
+                INSERT INTO users (
+                    username, password_hash, role, can_inbound, can_outbound,
+                    can_presentation, is_active, created_at, updated_at, tenant_id
+                ) VALUES (?, ?, 'user', 0, 0, 1, 1, ?, ?, ?)
+                """,
+                (access_request["username"], access_request["password_hash"], now, now, target_tenant_id),
+            )
+            conn.execute(
+                """
+                UPDATE commercial_access_requests
+                SET status = 'approved', reviewed_at = ?, reviewed_by = ? WHERE id = ?
+                """,
+                (now, actor.id, request_id),
+            )
+            row = conn.execute(
+                """
+                SELECT r.*, u.username AS reviewed_by_username
+                FROM commercial_access_requests r
+                LEFT JOIN users u ON u.id = r.reviewed_by WHERE r.id = ?
+                """,
+                (request_id,),
+            ).fetchone()
+            conn.commit()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Username gia in uso") from exc
+    return commercial_request_from_row(row)
+
+
+@app.post(
+    "/api/commercial-access-requests/{request_id}/reject",
+    response_model=CommercialAccessRequest,
+)
+def reject_commercial_access(request_id: int, request: Request) -> CommercialAccessRequest:
+    actor = request_user(request)
+    ensure_superadmin(actor)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            """
+            UPDATE commercial_access_requests
+            SET status = 'rejected', reviewed_at = ?, reviewed_by = ?
+            WHERE id = ? AND tenant_id = ? AND status = 'pending'
+            """,
+            (utc_now(), actor.id, request_id, principal_tenant_id()),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Richiesta pendente non trovata")
+        row = conn.execute(
+            """
+            SELECT r.*, u.username AS reviewed_by_username
+            FROM commercial_access_requests r
+            LEFT JOIN users u ON u.id = r.reviewed_by WHERE r.id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        conn.commit()
+    return commercial_request_from_row(row)
 
 
 @app.get("/api/users", response_model=list[AuthUser])
@@ -3028,9 +3300,29 @@ def index_documentation() -> VectorStoreStats:
 @app.post("/api/vector-store/pdf", response_model=VectorStorePdfResult)
 async def upload_pdf_vector_store(
     file: UploadFile = File(...),
+    area_id: int | None = Form(default=None),
+    module_id: int | None = Form(default=None),
     mode: str = Query(default="replace", pattern="^(append|replace)$"),
 ) -> VectorStorePdfResult:
     ensure_storage()
+    if area_id is not None and module_id is not None:
+        raise HTTPException(status_code=400, detail="Scegli un'area oppure un modulo di destinazione")
+    if area_id is not None:
+        with sqlite3.connect(DB_PATH) as conn:
+            area_exists = conn.execute(
+                "SELECT 1 FROM knowledge_areas WHERE id = ? AND tenant_id = ?",
+                (area_id, tenant_id()),
+            ).fetchone()
+        if not area_exists:
+            raise HTTPException(status_code=404, detail="Area di destinazione non trovata")
+    if module_id is not None:
+        with sqlite3.connect(DB_PATH) as conn:
+            module_exists = conn.execute(
+                "SELECT 1 FROM knowledge_modules WHERE id = ? AND tenant_id = ?",
+                (module_id, tenant_id()),
+            ).fetchone()
+        if not module_exists:
+            raise HTTPException(status_code=404, detail="Modulo di destinazione non trovato")
     if file.content_type not in {"application/pdf", "application/octet-stream"}:
         raise HTTPException(status_code=400, detail="Upload must be a PDF")
 
@@ -3041,6 +3333,41 @@ async def upload_pdf_vector_store(
     extracted_text, pages = extract_pdf_text(contents)
     source = file.filename or "documento.pdf"
     chunks = index_vector_chunks(source, extracted_text, replace_source=mode == "replace")
+    if area_id is not None:
+        with sqlite3.connect(DB_PATH) as conn:
+            module_row = conn.execute(
+                """
+                SELECT id FROM knowledge_modules
+                WHERE area_id = ? AND tenant_id = ? AND name = 'Documenti' COLLATE NOCASE
+                """,
+                (area_id, tenant_id()),
+            ).fetchone()
+            if module_row:
+                module_id = int(module_row[0])
+            else:
+                now = utc_now()
+                position = conn.execute(
+                    "SELECT COALESCE(MAX(position) + 1, 0) FROM knowledge_modules WHERE area_id = ? AND tenant_id = ?",
+                    (area_id, tenant_id()),
+                ).fetchone()[0]
+                module_id = int(conn.execute(
+                    """
+                    INSERT INTO knowledge_modules (tenant_id, area_id, name, position, created_at, updated_at)
+                    VALUES (?, ?, 'Documenti', ?, ?, ?)
+                    """,
+                    (tenant_id(), area_id, position, now, now),
+                ).lastrowid)
+                conn.commit()
+    if module_id is not None:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE knowledge_documents SET module_id = ?, updated_at = ?
+                WHERE source = ? AND tenant_id = ?
+                """,
+                (module_id, utc_now(), source, tenant_id()),
+            )
+            conn.commit()
     stats = get_vector_store_stats()
     return VectorStorePdfResult(
         chunks=stats.chunks,
@@ -3194,6 +3521,17 @@ def search_vector_store(
 ) -> VectorSearchResponse:
     ensure_storage()
     return VectorSearchResponse(results=search_vector_chunks(q, limit, source))
+
+
+@app.get("/api/vector-store/overview", response_model=VectorSearchResponse)
+def vector_store_overview(
+    source: str = Query(min_length=1, max_length=260),
+    limit: int = Query(default=24, ge=1, le=40),
+) -> VectorSearchResponse:
+    ensure_storage()
+    if not source.startswith(("area:", "module:")):
+        raise HTTPException(status_code=400, detail="La panoramica richiede un'area o un modulo")
+    return VectorSearchResponse(results=scope_overview_chunks(source, limit))
 
 
 def visible_elevenlabs_config(user: AuthUser) -> ElevenLabsConfig:
