@@ -38,6 +38,27 @@ services:
     expose:
       - "8002"
 
+  mediawiki-sync:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.mediawiki_sync", "--loop"]
+    environment:
+      MEDIAWIKI_BASE_URL: ${MEDIAWIKI_BASE_URL:-https://wikiweb.centropaghe.it}
+      MEDIAWIKI_ROOT_PAGE: ${MEDIAWIKI_ROOT_PAGE:-Help_On_Line}
+      MEDIAWIKI_USERNAME: ${MEDIAWIKI_USERNAME:-}
+      MEDIAWIKI_PASSWORD: ${MEDIAWIKI_PASSWORD:-}
+      MEDIAWIKI_TENANT: ${MEDIAWIKI_TENANT:-principale}
+      MEDIAWIKI_AREA: ${MEDIAWIKI_AREA:-Paghe Web}
+      MEDIAWIKI_SYNC_INTERVAL_MINUTES: ${MEDIAWIKI_SYNC_INTERVAL_MINUTES:-15}
+      MEDIAWIKI_FULL_SYNC_HOURS: ${MEDIAWIKI_FULL_SYNC_HOURS:-24}
+      MEDIAWIKI_VERIFY_SSL: ${MEDIAWIKI_VERIFY_SSL:-true}
+    volumes:
+      - ./server-data:/app/data
+    depends_on:
+      backend:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend
