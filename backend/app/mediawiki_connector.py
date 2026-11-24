@@ -26,8 +26,6 @@ SKIPPED_NAMESPACE_PREFIXES = {
     "utente",
     "user",
     "mediawiki",
-    "aiuto",
-    "help",
 }
 
 REMOVED_SELECTORS = (
@@ -83,6 +81,16 @@ class CrawlResult:
 
 def normalize_title(value: str) -> str:
     return " ".join(unquote(value).replace("_", " ").split())
+
+
+def navigation_label(title: str) -> str:
+    normalized = normalize_title(title)
+    if ":" not in normalized:
+        return normalized
+    namespace, page_name = (part.strip() for part in normalized.split(":", 1))
+    if namespace.casefold() == page_name.casefold():
+        return page_name
+    return page_name or namespace
 
 
 def is_document_title(title: str) -> bool:
@@ -293,7 +301,7 @@ class MediaWikiClient:
         api_links = [
             normalize_title(link.get("title", ""))
             for link in parsed.get("links", [])
-            if int(link.get("ns") or 0) == 0 and is_document_title(link.get("title", ""))
+            if is_document_title(link.get("title", ""))
         ]
         links = tuple(dict.fromkeys([*html_links, *api_links]))
         source_url = f"{self.base_url}/index.php?title={canonical_title.replace(' ', '_')}"
@@ -345,7 +353,7 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
         known_id = title_to_page_id.get(normalized_key)
         if known_id is not None:
             page = pages[known_id]
-            path = (*parent_path, page.page.title)
+            path = (*parent_path, navigation_label(page.page.title))
             if path not in page.paths:
                 page.paths.append(path)
             continue
@@ -357,11 +365,11 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
         except Exception as exc:
             errors.append(f"{title}: {exc}")
             continue
-        if page.namespace != 0:
+        if not is_document_title(page.title) and parent_path:
             continue
         title_to_page_id[normalized_key] = page.page_id
         title_to_page_id[page.title.casefold()] = page.page_id
-        path = (*parent_path, page.title)
+        path = (*parent_path, navigation_label(page.title))
         crawled = pages.setdefault(page.page_id, CrawledPage(page=page))
         if path not in crawled.paths:
             crawled.paths.append(path)
@@ -372,7 +380,7 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
             linked_id = title_to_page_id.get(linked_title.casefold())
             if linked_id is not None:
                 existing = pages[linked_id]
-                linked_path = (*path, existing.page.title)
+                linked_path = (*path, navigation_label(existing.page.title))
                 if linked_path not in existing.paths:
                     existing.paths.append(linked_path)
                 continue

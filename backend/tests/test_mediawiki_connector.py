@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from app import main as core
-from app.mediawiki_connector import CrawlResult, CrawledPage, WikiPage, crawl_wiki, extract_document, title_from_href
+from app.mediawiki_connector import CrawlResult, CrawledPage, WikiPage, crawl_wiki, extract_document, navigation_label, title_from_href
 from app import mediawiki_sync as sync
 
 
@@ -37,6 +37,17 @@ class FakeClient:
 
 
 class MediaWikiExtractionTests(unittest.TestCase):
+    def test_accepts_document_namespaces_and_cleans_redundant_labels(self) -> None:
+        self.assertEqual(
+            title_from_href(
+                "/index.php?title=Help:Help",
+                "https://wikiweb.centropaghe.it",
+            ),
+            "Help:Help",
+        )
+        self.assertEqual(navigation_label("Manuale:Manuale"), "Manuale")
+        self.assertEqual(navigation_label("Manuale:Dipendenti"), "Dipendenti")
+
     def test_recognizes_mediawiki_path_info_links(self) -> None:
         self.assertEqual(
             title_from_href(
