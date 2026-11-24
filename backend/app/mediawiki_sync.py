@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app import main as core
-from app.mediawiki_connector import CrawlResult, MediaWikiClient, WikiPage, crawl_wiki
+from app.mediawiki_connector import CrawlResult, MediaWikiClient, WikiPage, crawl_wiki, navigation_label
 
 
 @dataclass(frozen=True)
@@ -184,7 +184,7 @@ def module_name_for_path(path: tuple[str, ...]) -> str:
 
 
 def source_for_page(page: WikiPage) -> str:
-    title = " ".join(page.title.split())[:180]
+    title = " ".join(navigation_label(page.title).split())[:180]
     return f"WikiWeb - {title} [#{page.page_id}]"
 
 

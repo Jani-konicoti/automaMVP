@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -64,6 +65,7 @@ class WikiPage:
     text_hash: str
     links: tuple[str, ...]
     discarded: dict[str, int]
+    link_contexts: tuple[tuple[str, str | None], ...] = ()
 
 
 @dataclass
@@ -212,6 +214,31 @@ def extract_document(html: str, title: str, base_url: str) -> tuple[str, tuple[s
     return text, tuple(links), discarded
 
 
+def section_label(value: str) -> str | None:
+    normalized = " ".join(value.split())
+    normalized = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", normalized).strip()
+    return normalized or None
+
+
+def extract_contextual_links(html: str, base_url: str) -> tuple[tuple[str, str | None], ...]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    contexts: list[tuple[str, str | None]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for anchor in soup.find_all("a", href=True):
+        linked_title = title_from_href(str(anchor.get("href")), base_url)
+        if not linked_title:
+            continue
+        heading = anchor.find_previous(["h1", "h2", "h3", "h4", "h5", "h6"])
+        section = section_label(heading.get_text(" ", strip=True)) if heading else None
+        if section and section.casefold() == navigation_label(linked_title).casefold():
+            section = None
+        item = (linked_title, section)
+        if item not in seen:
+            seen.add(item)
+            contexts.append(item)
+    return tuple(contexts)
+
+
 class MediaWikiClient:
     def __init__(
         self,
@@ -297,13 +324,23 @@ class MediaWikiClient:
         html = parsed.get("text") or ""
         if isinstance(html, dict):
             html = html.get("*") or ""
-        text, html_links, discarded = extract_document(str(html), canonical_title, self.base_url)
+        text, html_links, discarded = extract_document(
+            str(html),
+            navigation_label(canonical_title),
+            self.base_url,
+        )
+        contextual_links = extract_contextual_links(str(html), self.base_url)
         api_links = [
             normalize_title(link.get("title", ""))
             for link in parsed.get("links", [])
             if is_document_title(link.get("title", ""))
         ]
         links = tuple(dict.fromkeys([*html_links, *api_links]))
+        contextual_titles = {title for title, _ in contextual_links}
+        link_contexts = (
+            *contextual_links,
+            *((title, None) for title in api_links if title not in contextual_titles),
+        )
         source_url = f"{self.base_url}/index.php?title={canonical_title.replace(' ', '_')}"
         return WikiPage(
             page_id=page_id,
@@ -316,6 +353,7 @@ class MediaWikiClient:
             text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             links=links,
             discarded=discarded,
+            link_contexts=tuple(link_contexts),
         )
 
     def recent_changes(self, since: str) -> list[dict[str, Any]]:
@@ -376,14 +414,18 @@ def crawl_wiki(client: MediaWikiClient, root_title: str, limit: int | None = Non
         if page.page_id in expanded_ids:
             continue
         expanded_ids.add(page.page_id)
-        for linked_title in page.links:
+        link_contexts = page.link_contexts or tuple((linked_title, None) for linked_title in page.links)
+        for linked_title, section in link_contexts:
+            linked_parent_path = path
+            if section and (not path or section.casefold() != path[-1].casefold()):
+                linked_parent_path = (*path, section)
             linked_id = title_to_page_id.get(linked_title.casefold())
             if linked_id is not None:
                 existing = pages[linked_id]
-                linked_path = (*path, navigation_label(existing.page.title))
+                linked_path = (*linked_parent_path, navigation_label(existing.page.title))
                 if linked_path not in existing.paths:
                     existing.paths.append(linked_path)
                 continue
-            queue.append((linked_title, path))
+            queue.append((linked_title, linked_parent_path))
 
     return CrawlResult(pages=pages, errors=errors, truncated=truncated)

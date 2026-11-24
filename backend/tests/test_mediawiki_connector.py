@@ -7,11 +7,26 @@ import unittest
 from pathlib import Path
 
 from app import main as core
-from app.mediawiki_connector import CrawlResult, CrawledPage, WikiPage, crawl_wiki, extract_document, navigation_label, title_from_href
+from app.mediawiki_connector import (
+    CrawlResult,
+    CrawledPage,
+    WikiPage,
+    crawl_wiki,
+    extract_contextual_links,
+    extract_document,
+    navigation_label,
+    title_from_href,
+)
 from app import mediawiki_sync as sync
 
 
-def make_page(page_id: int, title: str, text: str, links: tuple[str, ...] = ()) -> WikiPage:
+def make_page(
+    page_id: int,
+    title: str,
+    text: str,
+    links: tuple[str, ...] = (),
+    link_contexts: tuple[tuple[str, str | None], ...] = (),
+) -> WikiPage:
     return WikiPage(
         page_id=page_id,
         title=title,
@@ -23,6 +38,7 @@ def make_page(page_id: int, title: str, text: str, links: tuple[str, ...] = ()) 
         text_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         links=links,
         discarded={},
+        link_contexts=link_contexts,
     )
 
 
@@ -85,6 +101,21 @@ class MediaWikiExtractionTests(unittest.TestCase):
         self.assertEqual(links, ("Anagrafica",))
         self.assertGreater(discarded.get("script", 0), 0)
 
+    def test_links_inherit_their_document_section(self) -> None:
+        html = """
+        <h2>1 ELABORAZIONI</h2>
+        <ul><li><a href="/index.php?title=Guide_operative:Workflow">Workflow paghe</a></li></ul>
+        <h2>2 ANF</h2>
+        <ul><li><a href="/index.php?title=Guide_operative:Scarico_ANF">Scarico ANF</a></li></ul>
+        """
+        self.assertEqual(
+            extract_contextual_links(html, "https://wikiweb.centropaghe.it"),
+            (
+                ("Guide operative:Workflow", "ELABORAZIONI"),
+                ("Guide operative:Scarico ANF", "ANF"),
+            ),
+        )
+
     def test_crawler_deduplicates_pages_and_stops_cycles(self) -> None:
         root = make_page(1, "Help On Line", "Root documentazione", ("Manuale", "Alias Manuale"))
         manual = make_page(2, "Manuale", "Manuale paghe", ("Help On Line", "Dipendenti"))
@@ -102,6 +133,37 @@ class MediaWikiExtractionTests(unittest.TestCase):
         self.assertEqual(result.errors, [])
         self.assertLessEqual(len(client.calls), 4)
         self.assertGreaterEqual(len(result.pages[2].paths), 1)
+
+    def test_crawler_places_pages_under_the_index_section(self) -> None:
+        root = make_page(
+            1,
+            "Help On Line",
+            "Root documentazione",
+            ("Guide operative:Guide operative",),
+        )
+        index = make_page(
+            2,
+            "Guide operative:Guide operative",
+            "Indice guide operative",
+            ("Guide operative:Workflow",),
+            (("Guide operative:Workflow", "ELABORAZIONI"),),
+        )
+        workflow = make_page(3, "Guide operative:Workflow", "Procedura workflow completa")
+        result = crawl_wiki(
+            FakeClient(
+                {
+                    "Help On Line": root,
+                    "Guide operative:Guide operative": index,
+                    "Guide operative:Workflow": workflow,
+                }
+            ),
+            "Help_On_Line",
+        )
+
+        self.assertIn(
+            ("Help On Line", "Guide operative", "ELABORAZIONI", "Workflow"),
+            result.pages[3].paths,
+        )
 
 
 class MediaWikiStorageTests(unittest.TestCase):
