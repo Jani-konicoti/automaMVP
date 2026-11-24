@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from app import main as core
-from app.mediawiki_connector import CrawlResult, CrawledPage, WikiPage, crawl_wiki, extract_document
+from app.mediawiki_connector import CrawlResult, CrawledPage, WikiPage, crawl_wiki, extract_document, title_from_href
 from app import mediawiki_sync as sync
 
 
@@ -37,6 +37,15 @@ class FakeClient:
 
 
 class MediaWikiExtractionTests(unittest.TestCase):
+    def test_recognizes_mediawiki_path_info_links(self) -> None:
+        self.assertEqual(
+            title_from_href(
+                "/index.php/Manuale_Dipendenti",
+                "https://wikiweb.centropaghe.it",
+            ),
+            "Manuale Dipendenti",
+        )
+
     def test_extracts_structured_content_and_removes_interface(self) -> None:
         html = """
         <div class="toc"><a href="#uno">Indice</a></div>

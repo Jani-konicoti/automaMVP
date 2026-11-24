@@ -107,6 +107,8 @@ def title_from_href(href: str, base_url: str) -> str | None:
         title = normalize_title(query_title)
     elif parsed.path.startswith("/wiki/"):
         title = normalize_title(parsed.path[len("/wiki/") :])
+    elif parsed.path.startswith("/index.php/"):
+        title = normalize_title(parsed.path[len("/index.php/") :])
     else:
         return None
     return title if is_document_title(title) else None
