@@ -120,6 +120,7 @@ import {
   createKnowledgeModule,
   deleteKnowledgeArea,
   deleteKnowledgeModule,
+  deleteKnowledgeDocument,
   moveKnowledgeItem,
   updateKnowledgeArea,
   updateKnowledgeModule,
@@ -3111,7 +3112,7 @@ function VectorSourceSelector({
   const [isManaging, setIsManaging] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [editor, setEditor] = useState<{ kind: "area" | "module"; id?: number; parentId?: number; name: string } | null>(null);
-  const [deleting, setDeleting] = useState<{ kind: "area" | "module"; id: number; name: string } | null>(null);
+  const [deleting, setDeleting] = useState<{ kind: "area" | "module" | "document"; id: number; name: string } | null>(null);
   const [dropTargetAreaId, setDropTargetAreaId] = useState<number | null>(null);
   const [treeQuery, setTreeQuery] = useState("");
   const [expandedAreas, setExpandedAreas] = useState<Set<number>>(() => new Set());
@@ -3158,7 +3159,8 @@ function VectorSourceSelector({
   };
   const confirmDelete = async () => {
     if (!deleting) return;
-    const removed = await runTreeAction(() => deleting.kind === "area" ? deleteKnowledgeArea(deleting.id) : deleteKnowledgeModule(deleting.id));
+    const remove = { area: deleteKnowledgeArea, module: deleteKnowledgeModule, document: deleteKnowledgeDocument }[deleting.kind];
+    const removed = await runTreeAction(() => remove(deleting.id));
     if (removed) setDeleting(null);
   };
   const moveDragged = async (kind: "areas" | "modules" | "documents", parentId: number | null, position: number) => {

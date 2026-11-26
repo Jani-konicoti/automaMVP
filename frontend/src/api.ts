@@ -466,6 +466,10 @@ export function updateKnowledgeModule(id: number, areaId: number, name: string) 
   return request<KnowledgeTree>(`/api/knowledge-tree/modules/${id}`, { method: "PUT", body: JSON.stringify({ area_id: areaId, name }) });
 }
 
+export function deleteKnowledgeDocument(id: number) {
+  return request<KnowledgeTree>(`/api/knowledge-tree/documents/${id}`, { method: "DELETE" });
+}
+
 export function deleteKnowledgeModule(id: number) {
   return request<KnowledgeTree>(`/api/knowledge-tree/modules/${id}`, { method: "DELETE" });
 }

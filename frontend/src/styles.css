@@ -1513,6 +1513,8 @@ textarea:focus {
   padding: 7px 10px 7px 48px;
 }
 
+.knowledge-selector.managing .knowledge-document { grid-template-columns: auto auto auto minmax(0, 1fr) auto; }
+
 .knowledge-document:hover,
 .knowledge-document:has(input:checked) {
   background: #f1f7f4;

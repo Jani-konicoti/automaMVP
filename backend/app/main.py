@@ -3231,6 +3231,25 @@ def delete_knowledge_module(module_id: int, request: Request) -> KnowledgeTree:
     return get_knowledge_tree()
 
 
+@app.delete("/api/knowledge-tree/documents/{document_id}", response_model=KnowledgeTree)
+def delete_knowledge_document(document_id: int, request: Request) -> KnowledgeTree:
+    ensure_admin(request_user(request))
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "DELETE FROM knowledge_documents WHERE id = ? AND tenant_id = ? RETURNING source",
+            (document_id, tenant_id()),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Documento non trovato")
+        conn.execute("DELETE FROM vector_chunks WHERE source = ? AND tenant_id = ?", (row[0], tenant_id()))
+        for column in ("inbound_source", "outbound_source", "presentation_source"):
+            conn.execute(
+                f"UPDATE tenant_configs SET {column} = NULL WHERE tenant_id = ? AND {column} IN (?, ?)",
+                (tenant_id(), f"document:{document_id}", row[0]),
+            )
+    return get_knowledge_tree()
+
+
 def reorder_knowledge_rows(conn: sqlite3.Connection, table: str, row_id: int, parent_column: str | None, parent_id: int | None, position: int) -> None:
     allowed = {"knowledge_areas", "knowledge_modules", "knowledge_documents"}
     if table not in allowed:
